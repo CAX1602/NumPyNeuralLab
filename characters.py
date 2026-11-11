@@ -1,0 +1,224 @@
+"""角色表：一份数据同时决定外观和数值。
+
+12 个角色，每个 = 几个外观开关 + 三个数字：
+    speed  左右移动速度（像素/秒）
+    power  击球力量（出球速度的倍率）
+    jump   跳跃高度（像素）
+
+选人界面、物理和绘制都读这一份表，不写第二份。
+"""
+
+import math
+
+import pygame
+
+GRAVITY = 1800.0
+INK = (28, 28, 32)
+WHITE = (246, 246, 242)
+RACKET = (228, 196, 62)
+
+# 顺序有讲究：第 i 个和第 i+6 个是一对，三项数值互补。
+CHARACTERS = [
+    {"id": "tophat", "name": "Top Hat", "hat": "top", "hair": None, "extra": None,
+     "accent": (52, 52, 60), "speed": 385, "power": 1.02, "jump": 125},
+    {"id": "rex", "name": "Rex", "hat": None, "hair": "cap", "extra": None,
+     "accent": (178, 44, 40), "speed": 430, "power": 0.92, "jump": 120},
+    {"id": "beanie", "name": "Beanie", "hat": "beanie", "hair": None, "extra": None,
+     "accent": (58, 118, 190), "speed": 360, "power": 0.96, "jump": 150},
+    {"id": "specs", "name": "Specs", "hat": None, "hair": "cap", "extra": "glasses",
+     "accent": (150, 150, 150), "speed": 375, "power": 1.13, "jump": 112},
+    {"id": "pony", "name": "Ponytail", "hat": None, "hair": "pony", "extra": None,
+     "accent": (172, 62, 52), "speed": 425, "power": 0.90, "jump": 115},
+    {"id": "helmet", "name": "Helmet", "hat": "helmet", "hair": None, "extra": None,
+     "accent": (70, 160, 160), "speed": 355, "power": 0.98, "jump": 155},
+    {"id": "phones", "name": "Phones", "hat": None, "hair": None, "extra": "phones",
+     "accent": (224, 126, 56), "speed": 405, "power": 0.96, "jump": 115},
+    {"id": "cap", "name": "Cap", "hat": "cap", "hair": None, "extra": None,
+     "accent": (82, 160, 92), "speed": 410, "power": 1.00, "jump": 130},
+    {"id": "bun", "name": "Bun", "hat": None, "hair": "bun", "extra": None,
+     "accent": (126, 126, 126), "speed": 390, "power": 1.04, "jump": 120},
+    {"id": "antenna", "name": "Antenna", "hat": None, "hair": None, "extra": "antenna",
+     "accent": (120, 190, 190), "speed": 365, "power": 1.14, "jump": 100},
+    {"id": "scarf", "name": "Scarf", "hat": None, "hair": None, "extra": "scarf",
+     "accent": (200, 60, 60), "speed": 400, "power": 0.98, "jump": 128},
+    {"id": "bowtie", "name": "Bowtie", "hat": None, "hair": None, "extra": "bowtie",
+     "accent": (150, 90, 190), "speed": 395, "power": 1.06, "jump": 118},
+]
+
+CHAR_BY_ID = {c["id"]: c for c in CHARACTERS}
+
+
+def jump_speed(char):
+    """从跳跃高度反推起跳速度：v = sqrt(2gh)。"""
+    return math.sqrt(2 * GRAVITY * char["jump"])
+
+
+def _arc(cx, cy, r, a0, a1, n=14):
+    pts = []
+    for i in range(n):
+        a = a0 + (a1 - a0) * i / (n - 1)
+        pts.append((int(cx + r * math.cos(a)), int(cy + r * math.sin(a))))
+    return pts
+
+
+def _ellipse(cx, cy, a, b, angle, n=26):
+    pts = []
+    for i in range(n):
+        t = 2 * math.pi * i / n
+        px, py = a * math.cos(t), b * math.sin(t)
+        pts.append((
+            int(cx + px * math.cos(angle) - py * math.sin(angle)),
+            int(cy + px * math.sin(angle) + py * math.cos(angle)),
+        ))
+    return pts
+
+
+def draw_character(surface, char, x, feet_y, facing="right", scale=1.0):
+    s = scale
+    d = 1 if facing == "right" else -1
+
+    def P(dx, dy):
+        return (int(x + d * dx * s), int(feet_y + dy * s))
+
+    def W(w):
+        return max(1, int(round(w * s)))
+
+    lw = W(6)
+    head = P(0, -163)
+    radius = int(21 * s)
+    accent = char["accent"]
+
+    shadow = pygame.Surface((int(78 * s), int(20 * s)), pygame.SRCALPHA)
+    pygame.draw.ellipse(shadow, (0, 0, 0, 70), shadow.get_rect())
+    surface.blit(shadow, (int(x - 39 * s), int(feet_y - 10 * s)))
+
+    pygame.draw.line(surface, INK, P(0, -80), P(-30, 0), lw)
+    pygame.draw.line(surface, INK, P(0, -80), P(26, -4), lw)
+    pygame.draw.line(surface, INK, P(0, -80), P(0, -138), W(7))
+
+    pygame.draw.circle(surface, WHITE, head, radius)
+    pygame.draw.circle(surface, INK, head, radius, W(4))
+
+    hat = char["hat"]
+    if hat == "top":
+        hat_y = head[1] - radius - int(26 * s)
+        pygame.draw.rect(surface, INK, (head[0] - int(13 * s), hat_y, int(26 * s), int(28 * s)))
+        pygame.draw.ellipse(surface, INK, (head[0] - int(25 * s), hat_y + int(22 * s),
+                                           int(50 * s), int(10 * s)))
+    elif hat == "beanie":
+        pts = _arc(head[0], head[1], radius + int(3 * s), math.pi, 2 * math.pi)
+        pts += [(head[0] + radius + int(3 * s), head[1] - int(7 * s)),
+                (head[0] - radius - int(3 * s), head[1] - int(7 * s))]
+        pygame.draw.polygon(surface, accent, pts)
+        pygame.draw.circle(surface, accent, (head[0], head[1] - radius - int(8 * s)), W(6))
+        pygame.draw.line(surface, WHITE, (head[0] - radius, head[1] - int(7 * s)),
+                         (head[0] + radius, head[1] - int(7 * s)), W(2))
+    elif hat == "cap":
+        pts = _arc(head[0], head[1], radius + int(2 * s), math.pi, 2 * math.pi)
+        pts += [(head[0] + radius + int(2 * s), head[1] - int(7 * s)),
+                (head[0] - radius - int(2 * s), head[1] - int(7 * s))]
+        pygame.draw.polygon(surface, accent, pts)
+        brim = [(head[0] + d * int(4 * s), head[1] - int(9 * s)),
+                (head[0] + d * int(36 * s), head[1] - int(7 * s)),
+                (head[0] + d * int(36 * s), head[1] - int(1 * s)),
+                (head[0] + d * int(4 * s), head[1] - int(3 * s))]
+        pygame.draw.polygon(surface, accent, brim)
+    elif hat == "helmet":
+        pts = _arc(head[0], head[1], radius + int(4 * s), math.pi * 1.02, math.pi * 1.98)
+        pts += [(head[0] + radius + int(4 * s), head[1] - int(2 * s)),
+                (head[0] - radius - int(4 * s), head[1] - int(2 * s))]
+        pygame.draw.polygon(surface, accent, pts)
+        pygame.draw.line(surface, WHITE, (head[0], head[1] - radius - int(3 * s)),
+                         (head[0], head[1] - int(8 * s)), W(4))
+        pygame.draw.line(surface, accent, (head[0] + d * int(8 * s), head[1] - int(5 * s)),
+                         (head[0] + d * int(30 * s), head[1] - int(2 * s)), W(5))
+
+    hair = char["hair"]
+    if hair in ("cap", "pony", "bun"):
+        pts = _arc(head[0], head[1], radius + 1, math.pi, 2 * math.pi)
+        pts += [(head[0] + radius + 1, head[1] - int(5 * s)),
+                (head[0] - radius - 1, head[1] - int(5 * s))]
+        pygame.draw.polygon(surface, accent, pts)
+        if hair == "pony":
+            pygame.draw.lines(surface, accent, False, [
+                (head[0] - d * int(18 * s), head[1] - int(14 * s)),
+                (head[0] - d * int(34 * s), head[1] + int(4 * s)),
+                (head[0] - d * int(32 * s), head[1] + int(24 * s)),
+            ], W(7))
+        if hair == "bun":
+            pygame.draw.circle(surface, accent,
+                               (head[0] - d * int(7 * s), head[1] - radius - int(5 * s)), W(8))
+
+    extra = char["extra"]
+    if extra == "glasses":
+        pygame.draw.circle(surface, INK, (head[0] - int(9 * s), head[1] - int(1 * s)),
+                           W(6), W(2))
+        pygame.draw.circle(surface, INK, (head[0] + int(9 * s), head[1] - int(1 * s)),
+                           W(6), W(2))
+        pygame.draw.line(surface, INK, (head[0] - int(3 * s), head[1] - int(1 * s)),
+                         (head[0] + int(3 * s), head[1] - int(1 * s)), W(2))
+    elif extra == "phones":
+        pygame.draw.lines(surface, accent, False,
+                          _arc(head[0], head[1], radius + int(6 * s), math.pi * 1.12,
+                               math.pi * 1.88, 10), W(5))
+        for a in (math.pi * 1.12, math.pi * 1.88):
+            pygame.draw.circle(surface, accent,
+                               (int(head[0] + (radius + int(6 * s)) * math.cos(a)),
+                                int(head[1] + (radius + int(6 * s)) * math.sin(a))), W(6))
+    elif extra == "antenna":
+        pygame.draw.line(surface, INK, (head[0], head[1] - radius),
+                         (head[0], head[1] - radius - int(15 * s)), W(3))
+        pygame.draw.circle(surface, accent,
+                           (head[0], head[1] - radius - int(15 * s)), W(4))
+    elif extra == "scarf":
+        pygame.draw.line(surface, accent, (head[0] - int(14 * s), head[1] + int(24 * s)),
+                         (head[0] + int(14 * s), head[1] + int(24 * s)), W(8))
+        pygame.draw.line(surface, accent, (head[0] + int(7 * s), head[1] + int(27 * s)),
+                         (head[0] + int(12 * s), head[1] + int(44 * s)), W(5))
+    elif extra == "bowtie":
+        pygame.draw.polygon(surface, accent, [
+            (head[0] - int(14 * s), head[1] + int(19 * s)),
+            (head[0] - int(2 * s), head[1] + int(24 * s)),
+            (head[0] - int(14 * s), head[1] + int(29 * s)),
+        ])
+        pygame.draw.polygon(surface, accent, [
+            (head[0] + int(14 * s), head[1] + int(19 * s)),
+            (head[0] + int(2 * s), head[1] + int(24 * s)),
+            (head[0] + int(14 * s), head[1] + int(29 * s)),
+        ])
+        pygame.draw.circle(surface, accent, (head[0], head[1] + int(24 * s)), W(3))
+
+    shoulder = P(0, -128)
+    elbow = P(34, -152)
+    hand = P(50, -186)
+    pygame.draw.line(surface, INK, shoulder, elbow, lw)
+    pygame.draw.line(surface, INK, elbow, hand, lw)
+
+    handle = P(76, -196)
+    pygame.draw.line(surface, INK, hand, handle, W(5))
+    frame = _ellipse(handle[0] + d * int(24 * s), handle[1] - int(10 * s),
+                     int(23 * s), int(13 * s), math.radians(-32 * d))
+    pygame.draw.polygon(surface, RACKET, frame, W(4))
+
+    pygame.draw.line(surface, INK, shoulder, P(-26, -120), lw)
+    pygame.draw.line(surface, INK, P(-26, -120), P(-8, -96), lw)
+
+
+def normalize(char):
+    return {
+        "speed": min(1.0, max(0.0, (char["speed"] - 350) / 85)),
+        "power": min(1.0, max(0.0, (char["power"] - 0.89) / 0.26)),
+        "jump": min(1.0, max(0.0, (char["jump"] - 95) / 65)),
+    }
+
+
+def pros_cons(char):
+    n = normalize(char)
+    labels = {
+        "speed": ("Fast feet", "Slow feet"),
+        "power": ("Heavy smash", "Soft shots"),
+        "jump": ("Big jump", "Low jump"),
+    }
+    best = max(n, key=n.get)
+    worst = min(n, key=n.get)
+    return labels[best][0], labels[worst][1]

@@ -1,0 +1,14 @@
+experiment,setting,train_acc,val_acc,test_acc,train_loss,note
+boundary,network hidden=4 lr=1,1.0000,1.0000,1.0000,0.000928,
+boundary,linear logistic lr=1,0.6167,0.6250,0.5750,0.692240,no hidden layer
+noise,noise=0.1,1.0000,0.9958,1.0000,0.001199,mean of 3 seeds
+noise,noise=0.3,0.9139,0.8875,0.8667,0.205411,mean of 3 seeds
+noise,noise=0.5,0.7250,0.6542,0.7167,0.497369,mean of 3 seeds
+learning_rate,lr=0.01,0.6042,0.5875,0.6375,0.640228,
+learning_rate,lr=0.1,1.0000,1.0000,1.0000,0.022620,
+learning_rate,lr=1.0,1.0000,1.0000,1.0000,0.000928,
+learning_rate,lr=10.0,1.0000,1.0000,1.0000,0.000136,
+hidden_nodes,hidden=1,0.7597,0.6958,0.7042,0.476004,mean of 3 seeds
+hidden_nodes,hidden=2,1.0000,0.9917,1.0000,0.001930,mean of 3 seeds
+hidden_nodes,hidden=4,1.0000,0.9958,1.0000,0.001199,mean of 3 seeds
+hidden_nodes,hidden=8,1.0000,1.0000,1.0000,0.000805,mean of 3 seeds
