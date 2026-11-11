@@ -10,8 +10,6 @@
 
 import math
 
-import pygame
-
 GRAVITY = 1800.0
 INK = (28, 28, 32)
 WHITE = (246, 246, 242)
@@ -74,6 +72,8 @@ def _ellipse(cx, cy, a, b, angle, n=26):
 
 
 def draw_character(surface, char, x, feet_y, facing="right", scale=1.0):
+    import pygame  # 只有绘制需要 pygame；数据表本身可脱离 pygame 导入
+
     s = scale
     d = 1 if facing == "right" else -1
 
