@@ -1,0 +1,140 @@
+"""落点回归网络：8 → 16(tanh) → 1(线性)，0.5·MSE 损失。
+
+与 XOR 分类网络（network.py）同一套结构，只有两处不同：
+1. 输出层不做 sigmoid，直接输出线性值——落点 x 是连续量，不是概率。
+2. 损失从交叉熵换成 0.5·MSE。0.5 这个系数让输出层的 dZ2 = (A2 - y) / m
+   与 sigmoid+BCE 逐字同形，隐藏层反向公式完全复用——「损失函数决定任务」的直接证据。
+
+输入 = 击球后 0.15 s 的 4 帧观测（obs(n,4,2) 展平成 8 维），输出 = 落点 x。
+坐标统一除以场宽 COURT_W 做归一化（固定常数，不是从数据统计出来的，无泄漏）。
+
+**本模块不训练真实数据**：物理参数未定稿，shots.npz 还会重生成。
+正确性由合成数据保证（见 __main__ 与 tests/test_landing.py）；
+11-27 物理定稿后：make_shots.py 重生成 → load_dataset() → train() → 存 landing_model.npz。
+"""
+
+import numpy as np
+
+from physics import COURT_W
+
+
+def initialize_parameters(n_input=8, hidden_size=16, seed=42):
+    """创建旋钮。8→16→1 时共 8*16+16+16+1 = 161 个参数。"""
+    rng = np.random.default_rng(seed)
+    return {
+        "W1": rng.normal(0, 0.5, size=(n_input, hidden_size)),
+        "b1": np.zeros((1, hidden_size)),
+        "W2": rng.normal(0, 0.5, size=(hidden_size, 1)),
+        "b2": np.zeros((1, 1)),
+    }
+
+
+def forward(X, parameters):
+    """前向传播：tanh 隐藏层 + 线性输出（不压 sigmoid）。"""
+    Z1 = X @ parameters["W1"] + parameters["b1"]
+    A1 = np.tanh(Z1)
+    return A1 @ parameters["W2"] + parameters["b2"]
+
+
+def mse_loss(y, predictions):
+    """0.5 · 均方误差。取 0.5 是为了反向传播与分类网络同形。"""
+    return 0.5 * float(np.mean((predictions - y) ** 2))
+
+
+def compute_loss(X, y, parameters):
+    return mse_loss(y, forward(X, parameters))
+
+
+def rmse(y, predictions):
+    """均方根误差，和 y 同单位（用于报告「平均差多少」）。"""
+    return float(np.sqrt(np.mean((predictions - y) ** 2)))
+
+
+def backward(X, y, parameters):
+    """反向传播：除输出层少了 sigmoid 导数外，与 network.backward 完全一致。"""
+    m = X.shape[0]
+
+    Z1 = X @ parameters["W1"] + parameters["b1"]
+    A1 = np.tanh(Z1)
+    A2 = A1 @ parameters["W2"] + parameters["b2"]
+
+    # 0.5·MSE + 线性输出：dZ2 与 sigmoid+BCE 同一形式
+    dZ2 = (A2 - y) / m
+    dW2 = A1.T @ dZ2
+    db2 = np.sum(dZ2, axis=0, keepdims=True)
+
+    dA1 = dZ2 @ parameters["W2"].T
+    dZ1 = dA1 * (1 - A1 ** 2)
+    dW1 = X.T @ dZ1
+    db1 = np.sum(dZ1, axis=0, keepdims=True)
+
+    return {"W1": dW1, "b1": db1, "W2": dW2, "b2": db2}
+
+
+def train(X, y, hidden_size=16, learning_rate=0.1, epochs=3000,
+          seed=42, print_every=500, X_validation=None, y_validation=None):
+    """全批量梯度下降，接口与 train.py 对齐。返回 (参数, 历史)。
+
+    学习率默认 0.1：回归的梯度尺度与分类不同，0.5 会在几百轮内发散（11-19 实测），
+    0.1–0.3 在合成数据上稳定；与「lr=10 在 4 点集发散、400 点集收敛」同一课——
+    稳定学习率不能跨设置照搬。
+    """
+    parameters = initialize_parameters(X.shape[1], hidden_size, seed)
+    history = {"train": [], "validation": []}
+
+    for epoch in range(epochs):
+        loss = compute_loss(X, y, parameters)
+
+        validation_loss = None
+        if X_validation is not None:
+            validation_loss = compute_loss(X_validation, y_validation, parameters)
+            history["train"].append(loss)
+            history["validation"].append(validation_loss)
+
+        gradients = backward(X, y, parameters)
+        for name in parameters:
+            parameters[name] -= learning_rate * gradients[name]
+
+        if print_every and epoch % print_every == 0:
+            message = f"第 {epoch:5d} 轮   训练损失 {loss:.6f}"
+            if validation_loss is not None:
+                message += f"   验证损失 {validation_loss:.6f}"
+            print(message)
+
+    return parameters, history
+
+
+def flatten_obs(obs):
+    """obs(n,4,2) → X(n,8)：按帧展平 [x0,y0,x1,y1,...]，坐标除以场宽。"""
+    return (obs.reshape(obs.shape[0], -1) / COURT_W).astype(float)
+
+
+def load_dataset(path="shots.npz"):
+    """读 shots.npz → (X(n,8), y(n,1))，全部归一化到场宽单位。只读，不训练。"""
+    d = np.load(path)
+    X = flatten_obs(d["obs"])
+    y = (d["landing_x"].reshape(-1, 1) / COURT_W).astype(float)
+    return X, y
+
+
+def predict_landing_px(X, parameters):
+    """归一化输入 → 落点像素坐标，供 11-28 游戏内 predict() 调用。"""
+    return forward(X, parameters) * COURT_W
+
+
+# 合成数据自检：答案已知的函数，不碰 shots.npz
+if __name__ == "__main__":
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0, 1, size=(400, 8))
+    y = (0.2 + 0.5 * X[:, 0:1] - 0.3 * X[:, 1:2]
+         + 0.1 * X[:, 0:1] * X[:, 2:3])       # 线性项 + 一点非线性
+    X_val = rng.uniform(0, 1, size=(80, 8))
+    y_val = (0.2 + 0.5 * X_val[:, 0:1] - 0.3 * X_val[:, 1:2]
+             + 0.1 * X_val[:, 0:1] * X_val[:, 2:3])
+
+    parameters, _ = train(X, y, hidden_size=16, learning_rate=0.3,
+                          epochs=3000, seed=42, print_every=500,
+                          X_validation=X_val, y_validation=y_val)
+
+    print(f"\n训练 RMSE {rmse(y, forward(X, parameters)) * COURT_W:.2f} px")
+    print(f"验证 RMSE {rmse(y_val, forward(X_val, parameters)) * COURT_W:.2f} px")
