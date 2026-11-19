@@ -40,13 +40,13 @@ SERVE_V0 = 2000.0                             # 发球初速（落点约过网 2
 SERVE_ANGLE = 0.90
 RACKET_LEN = 70 * SCALE                       # 拍长 = 物理接触段（手→拍头）；改它会改手感，别乱动
 DRAW_RACKET_LEN = 104 * SCALE                 # 画出来的拍子比接触段长一点：球看起来打在拍面上（不超出去）
-CONTACT_R = 34                                # 宽松接触半径（接球第一，11-21 试玩再调）
+CONTACT_R = 34                                # 判定带半宽（球离扫过的拍杆多近算碰到）
 WAIST_H = 90 * SCALE                          # 腰部阈值，随跳跃上移
-# 挥拍缓冲（玩家手感）：0.36 s 的挥拍只有在球经过拍面那一瞬间才碰得到球，
-# 按早了就是空挥一次、球从身边飞过去 —— 所以玩家按下空格时如果球还远，
-# 先「憋住」，等球进到可击距离再自动挥出；按早了不作废。
-SWING_BUFFER = 0.65                           # 憋住的最长时间（s）
-SWING_REACH = 150.0                           # 球到人的水平距离小于它就算「可以挥了」
+# 判定带（用户：判定范围扩大成一个带子，球拍从后往前的整个过程都要算进来）：
+# 挥拍时拍杆扫过的是一个面，不是一个时刻的一条线 —— 所以每个子步把
+# 「本次挥拍从 q=0 到当前 q」之间采样 CONTACT_SAMPLES 个拍杆位置，球碰到其中任何一段都算击中。
+# 比「只在当前瞬间那条线段上判定」宽得多，也不会因为按早了就空挥（球在带子里就会被扫到）。
+CONTACT_SAMPLES = 12
 
 # 准备姿势（用户给的参考图；拍子举过头顶、拍头在身后 = 正确的架拍）：
 #   hi = 架拍待机：手举到头侧、拍面朝后上方，等头顶球（高远/杀球那种高球）
@@ -103,7 +103,6 @@ class Player:
         self.swing_t = -1.0              # <0 表示没在挥拍
         self.swing_type = "clear"
         self.contacted = False
-        self.pending = 0.0               # >0 表示「按了空格但在等球」的缓冲剩余时间
         self.recover_x = 260.0 if side == "L" else 640.0
 
     @property
@@ -168,13 +167,6 @@ class Player:
             self.swing_type = "lift" if ball is not None and ball.y_screen > self.waist_y else "clear"
         self.swing_t = 0.0
         self.contacted = False
-        return True
-
-    def buffered_swing(self, ball):
-        """按下空格但球还远 → 记下请求，等球进入可击距离再挥（见 SWING_BUFFER）。"""
-        if self.swing_t >= 0:
-            return False
-        self.pending = SWING_BUFFER
         return True
 
     def update(self, dt, move, jump):
@@ -316,6 +308,13 @@ class Game:
         if self.race and max(self.score) >= WIN_SCORE:
             self.over = True
 
+    def racket_at(self, p, q):
+        """挥拍进度 q（0..1）时的手位与拍杆角，和 hand()/theta_now() 同一套几何。"""
+        hi, lo, _ = SWING_ARC[p.swing_type]
+        th = hi + (lo - hi) * q
+        hx0, hy0 = _path_point(HAND_PATH[p.swing_type], q)
+        return (p.x + p.facing * hx0, p.feet_y + hy0, th)
+
     def try_contact(self, p):
         if p.swing_t < 0 or p.contacted or not self.ball.live:
             return
@@ -323,56 +322,30 @@ class Game:
         on_side = (b.x < NET_X) if p.side == "L" else (b.x > NET_X)
         if not on_side or b.last_hitter == p.side:   # 不能连击自己刚打出的球
             return
-        hx, hy = p.hand()
-        tx, ty = p.tip()
-        # 接触 = 球到拍杆线段（手→拍头）的距离足够近；s 为投影位置
-        dx, dy = tx - hx, ty - hy
-        s = ((b.x - hx) * dx + (b.y_screen - hy) * dy) / (RACKET_LEN * RACKET_LEN)
-        if not -0.1 <= s <= 1.1:
-            return
-        cx, cy = hx + s * dx, hy + s * dy
-        d = math.hypot(b.x - cx, b.y_screen - cy)
-        if d < CONTACT_R:
+        # 判定带：把本次挥拍从 q=0 到当前 q 扫过的整段拍杆都算进来。
+        # 从「当前」往「起点」倒着找，取第一个够得着的采样点 —— 优先用当前这一瞬的拍面，
+        # 只有球稍稍落在拍子后面/前面时才回退到扫过的路径上（否则全用手后方的早期位置，
+        # 出球角会被顶到弧线开头，球又变回高抛）。
+        q_now = p.swing_q()
+        hit = None                                   # (theta, s)
+        for i in range(CONTACT_SAMPLES - 1, -1, -1):
+            q = q_now * i / (CONTACT_SAMPLES - 1)
+            hx, hy, th = self.racket_at(p, q)
+            dx, dy = p.facing * math.cos(th) * RACKET_LEN, -math.sin(th) * RACKET_LEN
+            s = ((b.x - hx) * dx + (b.y_screen - hy) * dy) / (RACKET_LEN * RACKET_LEN)
+            if not -0.1 <= s <= 1.1:
+                continue
+            cx, cy = hx + s * dx, hy + s * dy
+            if math.hypot(b.x - cx, b.y_screen - cy) < CONTACT_R:
+                hit = (th, s)
+                break
+        if hit is not None:
+            th, s = hit
             s = min(1.0, max(0.0, s))
-            v0, angle = physics.resolve_hit(p.theta_now(), s, p.char["power"])
+            v0, angle = physics.resolve_hit(th, s, p.char["power"])
             b.launch(b.x, b.y, float(v0), float(angle), p.facing, p.side)
             p.contacted = True
             self.hits += 1
-
-    def ball_in_reach(self, p):
-        """球是否已经到了「可以挥拍」的距离（玩家缓冲挥拍用，比 AI 的起挥距离略宽）。"""
-        b = self.ball
-        if not b.live or b.last_hitter == p.side:
-            return False
-        on_side = (b.x < NET_X) if p.side == "L" else (b.x > NET_X)
-        if not on_side or abs(b.x - p.x) > SWING_REACH:
-            return False
-        return 20.0 < b.y < 300.0 + p.h and b.vy < 200.0
-
-    def request_swing(self, p):
-        """玩家按下空格：球已经到身边就立刻挥，还远就先记一个缓冲，等它进到可击距离再挥。"""
-        if p.swing_t >= 0:
-            return False
-        if not self.ball.live or self.ball.last_hitter == p.side:
-            return False
-        if self.ball_in_reach(p):
-            p.pending = 0.0
-            return p.start_swing(self.ball)
-        return p.buffered_swing(self.ball)
-
-    def tick_pending_swing(self, p, dt):
-        if p.pending <= 0.0:
-            return
-        if p.swing_t >= 0:                       # 正在挥：这次请求用掉了
-            p.pending = 0.0
-            return
-        if self.ball_in_reach(p):
-            p.pending = 0.0
-            p.start_swing(self.ball)
-            return
-        p.pending -= dt
-        if p.pending <= 0.0 or not self.ball.live or self.ball.last_hitter == p.side:
-            p.pending = 0.0
 
     def update(self, dt, keys):
         if self.paused or self.over:
@@ -393,8 +366,7 @@ class Game:
         amove, ajump = self.ai.update(dt, self.ball, not self.ball.live)
         self.ai_p.update(dt, amove, ajump)
         if keys.get("space", False):
-            self.request_swing(self.human)
-        self.tick_pending_swing(self.human, dt)
+            self.human.start_swing(self.ball if self.ball.live else None)
         # 球按 240 Hz 子步积分，与 physics.py 完全一致
         sub = 4
         for _ in range(sub):
@@ -638,9 +610,20 @@ def main():
                           pygame.K_LEFT: "a", pygame.K_RIGHT: "d", pygame.K_UP: "w",
                           pygame.K_SPACE: "space"}.get(e.key, "")] = False
             else:
-                game.update(1 / 60, keys)
-                game.draw(screen, fonts)
-                pygame.display.flip()
+                try:
+                    game.update(1 / 60, keys)
+                    game.draw(screen, fonts)
+                    pygame.display.flip()
+                except Exception:                     # 有 bug 时别让窗口卡死：写日志 + 暂停
+                    import traceback
+                    tb = traceback.format_exc()
+                    print(tb)
+                    try:
+                        with open("crash.log", "w", encoding="utf-8") as fh:
+                            fh.write(tb)
+                    except OSError:
+                        pass
+                    game.paused = True
                 clock.tick(60)
                 continue
             break
