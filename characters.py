@@ -71,7 +71,29 @@ def _ellipse(cx, cy, a, b, angle, n=26):
     return pts
 
 
-def draw_character(surface, char, x, feet_y, facing="right", scale=1.0):
+def _elbow(shoulder, hand, upper=27.0, fore=25.0):
+    """两段手臂 IK：已知肩和手，求肘位置。取肘部朝下的一解，动作像真人。
+
+    坐标与 draw_character 的 P() 同一套：相对脚底、面朝方向为正。
+    """
+    sx, sy = shoulder
+    dx, dy = hand[0] - sx, hand[1] - sy
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        return (sx + upper * 0.5, sy + upper * 0.5)
+    ux, uy = dx / dist, dy / dist
+    d = min(dist, upper + fore - 0.5)
+    cos_a = (upper * upper + d * d - fore * fore) / (2 * upper * d)
+    cos_a = max(-1.0, min(1.0, cos_a))
+    base = math.atan2(uy, ux)
+    ang = math.acos(cos_a)
+    e1 = (sx + upper * math.cos(base + ang), sy + upper * math.sin(base + ang))
+    e2 = (sx + upper * math.cos(base - ang), sy + upper * math.sin(base - ang))
+    return e1 if e1[1] > e2[1] else e2
+
+
+def draw_character(surface, char, x, feet_y, facing="right", scale=1.0,
+                   racket_theta=None, hand=None, free_hand=None, racket_len=70.0):
     import pygame  # 只有绘制需要 pygame；数据表本身可脱离 pygame 导入
 
     s = scale
@@ -95,6 +117,32 @@ def draw_character(surface, char, x, feet_y, facing="right", scale=1.0):
     pygame.draw.line(surface, INK, P(0, -80), P(-30, 0), lw)
     pygame.draw.line(surface, INK, P(0, -80), P(26, -4), lw)
     pygame.draw.line(surface, INK, P(0, -80), P(0, -138), W(7))
+
+    shoulder = P(0, -128)
+    swing_hand = hand if hand is not None else (30.0, -110.0)
+    rl = max(40.0, float(racket_len))              # 拍长（手→拍头中心约 0.95 rl）
+    rf = rl / 70.0                                 # 相对旧拍长的缩放
+
+    def _draw_swing_arm():
+        """挥拍姿势：肩→肘（IK）→手，拍面朝向 = racket_theta。"""
+        th = racket_theta
+        hx, hy = swing_hand
+        elbow = _elbow((0.0, -128.0), (hx, hy))
+        hx_s, hy_s = P(hx, hy)
+        pygame.draw.line(surface, INK, shoulder, P(*elbow), lw)
+        pygame.draw.line(surface, INK, P(*elbow), (hx_s, hy_s), lw)
+        dx, dy = d * math.cos(th), -math.sin(th)
+        handle = (hx_s + dx * 26 * rf * s, hy_s + dy * 26 * rf * s)
+        pygame.draw.line(surface, INK, (hx_s, hy_s),
+                         (int(handle[0]), int(handle[1])), W(5 * rf))
+        frame = _ellipse(handle[0] + dx * 24 * rf * s, handle[1] + dy * 24 * rf * s,
+                         int(23 * rf * s), int(13 * rf * s), -th * d)
+        pygame.draw.polygon(surface, RACKET, frame, W(4 * rf))
+
+    # 引拍时手在身体后侧 → 先画手臂和拍，让头挡住，才像「从背后挥出来」
+    behind = racket_theta is not None and hand is not None and hand[0] < 8.0
+    if behind:
+        _draw_swing_arm()
 
     pygame.draw.circle(surface, WHITE, head, radius)
     pygame.draw.circle(surface, INK, head, radius, W(4))
@@ -188,20 +236,26 @@ def draw_character(surface, char, x, feet_y, facing="right", scale=1.0):
         ])
         pygame.draw.circle(surface, accent, (head[0], head[1] + int(24 * s)), W(3))
 
-    shoulder = P(0, -128)
-    elbow = P(34, -152)
-    hand = P(50, -186)
-    pygame.draw.line(surface, INK, shoulder, elbow, lw)
-    pygame.draw.line(surface, INK, elbow, hand, lw)
+    if racket_theta is None:
+        # 待机姿势（旧静态姿势，正常游戏里由 game.py 传准备姿势角度，不走这里）
+        elbow = P(34, -152)
+        hand_p = P(50, -186)
+        pygame.draw.line(surface, INK, shoulder, elbow, lw)
+        pygame.draw.line(surface, INK, elbow, hand_p, lw)
+        handle = P(76, -196)
+        pygame.draw.line(surface, INK, hand_p, handle, W(5))
+        frame = _ellipse(handle[0] + d * int(24 * s), handle[1] - int(10 * s),
+                         int(23 * s), int(13 * s), math.radians(-32 * d))
+        pygame.draw.polygon(surface, RACKET, frame, W(4))
+    elif not behind:
+        # 挥拍姿势（手在身前时画在头之后），手位与 game.py 物理接触几何同一套
+        _draw_swing_arm()
 
-    handle = P(76, -196)
-    pygame.draw.line(surface, INK, hand, handle, W(5))
-    frame = _ellipse(handle[0] + d * int(24 * s), handle[1] - int(10 * s),
-                     int(23 * s), int(13 * s), math.radians(-32 * d))
-    pygame.draw.polygon(surface, RACKET, frame, W(4))
-
-    pygame.draw.line(surface, INK, shoulder, P(-26, -120), lw)
-    pygame.draw.line(surface, INK, P(-26, -120), P(-8, -96), lw)
+    # 非持拍手：姿势不同位置不同（架拍时抬到下巴高度，低姿势时挂在腰侧）
+    fh = free_hand if free_hand is not None else (-8.0, -96.0)
+    f_elbow = _elbow((0.0, -128.0), fh)
+    pygame.draw.line(surface, INK, shoulder, P(*f_elbow), lw)
+    pygame.draw.line(surface, INK, P(*f_elbow), P(*fh), lw)
 
 
 def normalize(char):
