@@ -20,22 +20,65 @@ import physics
 from characters import CHARACTERS, draw_character, jump_speed, normalize, pros_cons
 from game_style_preview import draw_shuttle, draw_trail
 
-W, H = 900, 500
+W, H = 1200, 500                   # 11-19 用户：「球场小了」→ 900 加宽到 1200（网在正中 600）
 FLOOR_Y = 460                      # 屏幕 y：地板线
 SCALE = 1.0
-NET_X = physics.NET_X              # 450
+ZOOM = 0.85                        # 整个世界在窗口里的缩放（用户：窗口/人物太大，整体缩小一点）。
+                                   # 世界坐标仍是 W×H（物理与判定都不变），只把画好的整帧缩放贴到窗口。
+ZOOM_MIN, ZOOM_MAX = 0.60, 1.20
+
+
+def window_size(zoom=None):
+    z = ZOOM if zoom is None else zoom
+    return max(320, int(W * z)), max(200, int(H * z))
+
+
+def present(screen, world):
+    """把世界画面按 ZOOM 缩放贴到窗口上（ZOOM=1 时就是 1:1）。"""
+    size = screen.get_size()
+    if size == world.get_size():
+        screen.blit(world, (0, 0))
+    else:
+        pygame.transform.smoothscale(world, size, screen)
+    pygame.display.flip()
+
+
+def draw_hints(s, font, items, x0, y, gap=20, cap_h=20):
+    """画一排「键帽 + 说明」，返回结束时的 x（用户：键位要更显眼）。"""
+    x = x0
+    for key, label in items:
+        kw = max(cap_h, font.size(key)[0] + 12)
+        r = pygame.Rect(x, y, kw, cap_h)
+        pygame.draw.rect(s, (60, 64, 72), r, border_radius=4)
+        pygame.draw.rect(s, (118, 124, 132), r, 1, border_radius=4)
+        t = font.render(key, True, (244, 244, 238))
+        s.blit(t, t.get_rect(center=r.center))
+        x += kw + 6
+        t2 = font.render(label, True, (180, 186, 182))
+        s.blit(t2, (x, r.centery - t2.get_height() // 2))
+        x += t2.get_width() + gap
+    return x
+NET_X = W // 2                     # 600（球场加宽后网在正中；不再取 physics.NET_X）
 NET_H = physics.NET_HEIGHT         # 150
 WIN_SCORE = 7
+WIN_GAMES = 2                      # 经典模式：三局两胜（先拿下 2 局）
+IC_HEIGHT = 250.0                  # AI 的截击高度（世界坐标）：球降到这个高度时拍子够得着
+SERVICE_LINE = 150.0               # 发球线：距网 150 px。发球必须站在这条线**后面**（用户：要有发球线）
+SPEED_DEFAULT = 5.0                # 标准球速档位（5 档 = V_MIN/V_MAX 1900/4100）；设置界面可改
 
 WALL = (168, 178, 174)
 WOOD = (198, 156, 106)
 INK = (28, 28, 32)
 
 # 挥拍弧线：θ 从大到小扫过（越晚接触越平越快），时长固定。
-# 11-17 用户两次要求「挥拍要快」：0.50/0.32 → 0.36/0.24（快 28%）。
-# 实测（3.2 倍球速，4 组 AI 对打 ×60 s）：0.36 s → 17.9 次/回合；
-# 再短到 0.32 s 会掉到 3.3（拍子扫过球路径的时间窗太窄），0.36 是拐点。
-SWING_ARC = {"clear": (1.20, -0.55, 0.36), "lift": (1.05, -0.15, 0.24)}
+# 11-23 用户：「挥拍速度太慢了」→ 0.36/0.42 再压到 0.30/0.32。
+SWING_ARC = {"clear": (1.02, -0.55, 0.30), "lift": (1.05, -0.15, 0.32)}
+LAUNCH_TILT = 0.50                            # 出球角 = 拍面角 − 这个值（rad）。调大 = 整体更下压。
+                                              # 11-23 用户：「出球角度函数常量再加」→ 改成非线性（见下）
+LAUNCH_KNEE = 1.00                            # 拍面角低于这个值，才开始「越平越尖」
+LAUNCH_SHARP = 0.45                           # 低拍角处额外追加的下压量（rad）；越大越尖
+                                              # 出球角 = θ − LAUNCH_TILT − LAUNCH_SHARP * t²，t 是 θ 低于 knee 的程度
+                                              # 效果：头顶（θ≈0.9）仍是 23°；球低一点（θ≈0.6）就压到 5°；再低就直接往下打
 SERVE_V0 = 2000.0                             # 发球初速（落点约过网 259 px，飞行 1.18 s）
 SERVE_ANGLE = 0.90
 RACKET_LEN = 70 * SCALE                       # 拍长 = 物理接触段（手→拍头）；改它会改手感，别乱动
@@ -47,14 +90,16 @@ WAIST_H = 90 * SCALE                          # 腰部阈值，随跳跃上移
 # 「本次挥拍从 q=0 到当前 q」之间采样 CONTACT_SAMPLES 个拍杆位置，球碰到其中任何一段都算击中。
 # 比「只在当前瞬间那条线段上判定」宽得多，也不会因为按早了就空挥（球在带子里就会被扫到）。
 CONTACT_SAMPLES = 12
+RECOVER_DUR = 0.38                            # 收拍后从收拍姿势平滑回到准备姿势的时长
+                                              # （用户：发完球别往下收，自然往上继续，变成架拍准备打头顶球）
 
 # 准备姿势（用户给的参考图；拍子举过头顶、拍头在身后 = 正确的架拍）：
 #   hi = 架拍待机：手举到头侧、拍面朝后上方，等头顶球（高远/杀球那种高球）
 #   lo = 低姿势：拍子垂在腰前、另一只手在腰侧托着球，等挑球和发球
-HAND_READY = {"hi": (-38.0, -166.0), "lo": (44.0, -100.0)}
-THETA_READY = {"hi": 2.35, "lo": -0.55}
-# 非持拍手：架拍时抬到下巴高度（参考图里那只手是抬起来的），低姿势挂在腰侧
-FREE_READY = {"hi": (20.0, -144.0), "lo": (-8.0, -96.0)}
+HAND_READY = {"hi": (-38.0, -166.0), "lo": (-36.0, -90.0)}
+THETA_READY = {"hi": 2.35, "lo": -2.15}
+# 非持拍手：架拍时抬到下巴高度（参考图里那只手是抬起来的），低姿势垂在体侧托球
+FREE_READY = {"hi": (20.0, -144.0), "lo": (24.0, -72.0)}
 
 # 挥拍手位关键帧：(进度 q, 手 x, 手 y)，相对脚底、面朝方向为正、y 向上为负。
 # 拍面角度仍严格走 SWING_ARC（出球只看 θ），手位只负责「人怎么挥」：
@@ -66,12 +111,14 @@ HAND_PATH = {
     # 高远球：拍子从架拍（手在头后）快速落到胸前再扫出去 —— 手落得越快，
     # 球在越低的位置被接住，出射角就越平（真实头顶挥拍的出球是 35~45°，不是 60°）；
     # 手停在头高会变成「每一拍都是高抛球」，见 11-17 击球层讨论。
-    "clear": [(0.00, -38, -166), (0.10, 30, -140), (0.30, 44, -118),
-              (0.60, 48, -106), (1.00, 52, -96)],
-    "lift": [(0.00, 44, -100), (0.14, 30, -90), (0.36, 22, -84),
+    "clear": [(0.00, -38, -166), (0.14, 24, -142), (0.34, 42, -118),
+              (0.66, 50, -104), (1.00, 22, -88)],
+    # 挑球：从腰侧低姿势向前上方兜起（发球也走这条弧线）
+    "lift": [(0.00, -36, -90), (0.14, 10, -86), (0.36, 22, -84),
              (0.58, 26, -88), (0.80, 38, -100), (1.00, 42, -112)],
 }
-SWING_SMOOTH = 0.06                           # 起手 0.06 s 内把拍面从准备角度接到弧线
+SWING_DRAW_LINEAR = True                      # 画出来的拍面角整段匀速转（架拍角 → 弧线终点），
+                                              # 不再「前 60 ms 甩完 40%」；判定弧线仍是 SWING_ARC
 
 
 def _path_point(keys, q):
@@ -97,13 +144,17 @@ class Player:
         self.char = char
         self.side = side                 # 'L' 或 'R'
         self.facing = 1 if side == "L" else -1
-        self.x = 250.0 if side == "L" else 650.0
+        self.x = W * 0.275 if side == "L" else W * 0.725
         self.h = 0.0                     # 跳起高度（世界坐标）
         self.vh = 0.0
         self.swing_t = -1.0              # <0 表示没在挥拍
         self.swing_type = "clear"
         self.contacted = False
-        self.recover_x = 260.0 if side == "L" else 640.0
+        self.recover_t = 1e9             # 收拍后的过渡计时（从收拍姿势回到准备姿势）
+        self.recover_hand = None
+        self.recover_theta = 0.0
+        # 11-19 球场加宽到 1200 后重标：0.68W 处回合最长（实测 18 次/回合，0.715W 只有 4.7）
+        self.recover_x = W * 0.32 if side == "L" else W * 0.68
 
     @property
     def feet_y(self):
@@ -114,13 +165,13 @@ class Player:
         return self.feet_y - WAIST_H
 
     def swing_q(self):
-        """挥拍进度 0..1（没在挥拍时返回 0）。"""
+        """整段挥拍的时间进度 0..1（沉拍 + 挥击都算）。"""
         if self.swing_t < 0:
             return 0.0
         return min(self.swing_t / SWING_ARC[self.swing_type][2], 1.0)
 
     def hand_offset(self):
-        """手相对脚底的位置：待机固定举拍，挥拍时走关键帧路径。"""
+        """手相对脚底的位置：待机固定举拍，挥拍时走关键帧路径（按整段时间）。"""
         if self.swing_t < 0:
             return HAND_IDLE
         return _path_point(HAND_PATH[self.swing_type], self.swing_q())
@@ -130,23 +181,32 @@ class Player:
         return (self.x + self.facing * dx, self.feet_y + dy)
 
     def theta_now(self):
-        hi, lo, dur = SWING_ARC[self.swing_type]
-        t = min(self.swing_t / dur, 1.0)
-        return hi + (lo - hi) * t
+        hi, lo, _dur = SWING_ARC[self.swing_type]
+        return hi + (lo - hi) * self.swing_q()
 
     def draw_theta(self):
-        """画拍子用的角度：起手一小段从准备姿势的角度平滑接到挥拍弧上。
+        """画拍子用的角度：先把拍面从准备姿势带到弧线起点，再整段匀速扫过弧线。
 
-        击球判定仍然只看 theta_now()；这里只负责视觉：架拍时拍头朝后上方
-        （2.35 rad），起手瞬间必须转身向前扫，所以头 SWING_SMOOTH 秒里把拍面
-        从准备角旋到弧线上，看起来就是「架拍 → 转身挥出去」。
+        为什么分两段：挑球的准备姿势拍子是朝下的（−0.55），而弧线起点在上方（1.05）——
+        以前直接从准备角插到「弧线终点」，画面上几乎不动（只转 0.4 rad），
+        看着像「没挥拍」。现在前 22%（挑球 32%）把拍面兜到弧线起点，后面匀速扫完。
+        击球判定仍走 theta_now()（物理弧线，没有变）。
         """
-        th = self.theta_now()
-        if self.swing_t >= 0:
-            k = min(self.swing_t / SWING_SMOOTH, 1.0)
-            start = THETA_READY["hi" if self.swing_type == "clear" else "lo"]
-            th = start + (th - start) * k
-        return th
+        start = THETA_READY["hi" if self.swing_type == "clear" else "lo"]
+        if self.swing_t < 0:
+            return start
+        hi, lo, _dur = SWING_ARC[self.swing_type]
+        q = self.swing_q()
+        if self.swing_type == "clear":
+            # 用户认可的画法：整段匀速从架拍角转到弧线终点（不搞「先快后慢」）
+            return start + (lo - start) * q
+        prep = 0.55
+        if q < prep:
+            k = q / prep
+            k = k * k * (3.0 - 2.0 * k)
+            return start + (hi - start) * k
+        k = (q - prep) / (1.0 - prep)
+        return hi + (lo - hi) * k
 
     def racket_dir(self):
         th = self.theta_now()
@@ -183,6 +243,12 @@ class Player:
             self.swing_t += dt
             if self.swing_t > SWING_ARC[self.swing_type][2]:
                 self.swing_t = -1.0
+                # 收完拍别「定格再瞬移」：记下收拍姿势，后面用 RECOVER_DUR 平滑过渡回准备姿势
+                self.recover_t = 0.0
+                self.recover_hand = _path_point(HAND_PATH[self.swing_type], 1.0)
+                self.recover_theta = SWING_ARC[self.swing_type][1]
+        elif self.recover_hand is not None:
+            self.recover_t += dt
 
 
 class Ball:
@@ -230,6 +296,7 @@ class AIController:
         self.state = "RECOVER"
         self.target = player.recover_x
         self.swing_dist = 130     # 球距多远时起挥（弧线缩短后重标：120→2.2、130→17.9、150→1.0）
+        self.lead_time = 0.13     # 「多久之后球到我这」的起挥阈值（秒）：改按时间起挥，球速变了也不会晚
         self.stand_off = 25       # 站在落点靠后多少
 
     def predict(self, ball):
@@ -237,6 +304,28 @@ class AIController:
             [ball.x], [ball.y], [math.hypot(ball.vx, ball.vy)],
             [math.atan2(ball.vy, abs(ball.vx))], [1 if ball.vx > 0 else -1])
         return float(land[0])
+
+    def intercept_x(self, ball, height=IC_HEIGHT):
+        """球飞到「球拍够得着的高度」时的 x。
+
+        平快球如果按落点站，球到身前时已经快贴地了（拍子扫不到）；站到这里才能在高处截住。
+        返回 None 表示球已经低于这个高度（够不着了）。
+
+        11-19 修的坑：平快球到网这边时往往已经低于 250，旧实现直接返回 None、
+        AI 就退回落点站位 → 站过头、球从身后溜走（实测 2.0 次/回合）。
+        现在按 250 → 190 → 140 → 100 逐档往下找，总能给一个「还够得着」的接球点。
+        """
+        v0 = math.hypot(ball.vx, ball.vy)
+        if v0 < 1.0:
+            return None
+        ang = math.atan2(ball.vy, abs(ball.vx))
+        d = 1 if ball.vx > 0 else -1
+        _, xs, ys = physics.simulate_path(ball.x, ball.y, v0, ang, d)
+        for h in (height, 190.0, 140.0, 100.0):
+            for x, y in zip(xs, ys):
+                if y <= h:
+                    return float(x)
+        return None
 
     def update(self, dt, ball, serve_pending):
         p = self.p
@@ -258,13 +347,19 @@ class AIController:
         elif self.state == "WAIT":
             pass
         elif self.state == "CHASE":
-            # 站在落点稍靠后一点，让球在身前接触
+            # 每帧重算目标：平快球按落点站会够不着，优先站到「球降到拍子高度」的那个 x；
+            # 球已经低于截击高度（快贴地了）就退回按落点站。
+            ic = self.intercept_x(ball)
+            self.target = ic if ic is not None else self.predict(ball)
+            # 站在目标稍靠后一点，让球在身前接触
             want = self.target - p.facing * self.stand_off
             if abs(p.x - want) > 6:
                 move = 1.0 if want > p.x else -1.0
             near = abs(ball.x - p.x) < self.swing_dist
             height_ok = 50 < ball.y < 250 + p.h
-            if near and height_ok and ball.vy < 150:
+            # 按「还要多久到」起挥，而不是「还有多远」：平快球用距离判会永远慢半拍
+            t_arrive = abs(ball.x - p.x) / (abs(ball.vx) + 1e-6)
+            if (near or t_arrive < self.lead_time) and height_ok and ball.vy < 150:
                 p.start_swing(ball)
                 self.state = "SWING"
         elif self.state == "SWING":
@@ -276,37 +371,71 @@ class AIController:
 
 
 class Game:
-    def __init__(self, p_char, a_char, smoke=False, race=False):
+    def __init__(self, p_char, a_char, smoke=False, race=True, classic=False, speed=None):
         self.human = Player(p_char, "L")
         self.ai_p = Player(a_char, "R")
         self.ai = AIController(self.ai_p)
         self.ball = Ball()
         self.score = [0, 0]
+        self.games = [0, 0]              # 经典模式：已拿下的局数
+        self.game_no = 1
+        self.classic = classic           # True = 三局两胜；race=False 时是无限练习
+        self.banner = ""                 # 中央提示（"GAME 2" / "OUT!"）
+        self.banner_sub = ""             # 提示的第二行
+        self.banner_rgb = (242, 202, 72)
+        self.banner_t = 0.0
         self.server = "L"
         self.serve_timer = 1.0
         self.paused = False
-        self.show_pred = False
+        self.debug = False              # 默认关（正式画面干净）；F1 打开看输入/判定状态
+        self.last_key = ""
+        self.keys_now = {}              # 本帧轮询到的按键状态（HUD 显示用）
+        self.space_prev = False         # 空格上升沿触发（按住只挥一次）
+        self.set_speed(SPEED_DEFAULT if speed is None else speed)
         self.over = False
         self.smoke = smoke
         self.race = race                  # True = 7 分制；默认练习模式（不限分，一直打）
         self.hits = 0
         self.rallies = 0
-        self.pred_x = None
+        self.serve_msg = ""               # 发球提示（站错位置/等按键时显示）
 
     def serve(self):
         p = self.human if self.server == "L" else self.ai_p
+        if p is self.human and NET_X - p.x < SERVICE_LINE:   # 站进发球线以内，发球无效
+            self.serve_msg = "step behind the service line, then press SPACE"
+            return
         self.ball.launch(p.x + p.facing * 30, 110, SERVE_V0, SERVE_ANGLE, p.facing, self.server)
         p.start_swing(force="lift")     # 只做发球动作：球已经从腰侧发出去了
+        self.serve_msg = ""
         self.rallies += 1
 
-    def point(self, winner):
+    def point(self, winner, out_by=None):
+        if out_by is not None:                           # 谁把球打出了界，当场在屏幕中间说一声
+            self.banner = "OUT!"
+            self.banner_sub = "YOU hit it out" if out_by == "L" else "AI hit it out"
+            self.banner_rgb = (255, 132, 100)
+            self.banner_t = 1.6
         self.score[0 if winner == "L" else 1] += 1
         self.server = winner
         self.ball.live = False
         self.serve_timer = 1.2
         self.ai.state = "RECOVER"
         if self.race and max(self.score) >= WIN_SCORE:
-            self.over = True
+            if not self.classic:                   # 单局：到这局结束
+                self.over = True
+                return
+            side = 0 if winner == "L" else 1       # 经典：一局结束，记一分大比分
+            self.games[side] += 1
+            if max(self.games) >= WIN_GAMES:       # 三局两胜拿到第 2 局 → 整场结束
+                self.over = True
+            else:                                  # 进入下一局
+                self.score = [0, 0]
+                self.game_no += 1
+                self.banner = f"GAME {self.game_no}"
+                self.banner_sub = f"{self.games[0]}-{self.games[1]}"
+                self.banner_rgb = (242, 202, 72)
+                self.banner_t = 2.0
+                self.serve_timer = 2.0
 
     def racket_at(self, p, q):
         """挥拍进度 q（0..1）时的手位与拍杆角，和 hand()/theta_now() 同一套几何。"""
@@ -343,6 +472,11 @@ class Game:
             th, s = hit
             s = min(1.0, max(0.0, s))
             v0, angle = physics.resolve_hit(th, s, p.char["power"])
+            # 出球角 = 拍面角 − 调整量。用户：「不要任何额外辅助，就调这个函数」，
+            # 并且要求「拍面角越向下、出球角压得越尖」→ 低于 LAUNCH_KNEE 的部分按平方追加下压。
+            low = max(0.0, min(1.0, (LAUNCH_KNEE - th) / 0.50))
+            angle -= LAUNCH_TILT + LAUNCH_SHARP * low * low
+            angle = max(angle, -0.61)                 # 最多往下 35°：再低就是往自己脚下砸了
             b.launch(b.x, b.y, float(v0), float(angle), p.facing, p.side)
             p.contacted = True
             self.hits += 1
@@ -350,10 +484,19 @@ class Game:
     def update(self, dt, keys):
         if self.paused or self.over:
             return
+        if self.banner_t > 0:
+            self.banner_t = max(0.0, self.banner_t - dt)
         if not self.ball.live:
-            self.serve_timer -= dt
-            if self.serve_timer <= 0:
-                self.serve()
+            if self.server == "R" or self.smoke:        # AI 自动发球；人必须自己按空格发
+                self.serve_timer -= dt
+                if self.serve_timer <= 0:
+                    self.serve()
+            else:
+                self.serve_timer = 0.0
+                if NET_X - self.human.x < SERVICE_LINE:  # 站在发球线以内不许发
+                    self.serve_msg = "step behind the service line, then press SPACE"
+                else:
+                    self.serve_msg = "press SPACE to serve"
         # 人类输入
         move = (keys.get("d", False) - keys.get("a", False)) if not self.smoke else 0.0
         jump = keys.get("w", False) if not self.smoke else False
@@ -365,8 +508,13 @@ class Game:
         self.human.update(dt, move, jump)
         amove, ajump = self.ai.update(dt, self.ball, not self.ball.live)
         self.ai_p.update(dt, amove, ajump)
-        if keys.get("space", False):
-            self.human.start_swing(self.ball if self.ball.live else None)
+        space = bool(keys.get("space", False))
+        if space and not self.space_prev:               # 按下那一下挥一次（按住不连挥）
+            if not self.ball.live and self.server == "L" and not self.smoke:
+                self.serve()                           # 发球：手动按空格
+            else:
+                self.human.start_swing(self.ball if self.ball.live else None)
+        self.space_prev = space
         # 球按 240 Hz 子步积分，与 physics.py 完全一致
         sub = 4
         for _ in range(sub):
@@ -378,7 +526,8 @@ class Game:
                 self.ball.live = False
                 x = self.ball.x
                 if x < 0 or x > W:                      # 出界：击球方失分
-                    self.point("R" if self.ball.last_hitter == "L" else "L")
+                    hitter = self.ball.last_hitter
+                    self.point("R" if hitter == "L" else "L", out_by=hitter)
                 else:
                     self.point("R" if x < NET_X else "L")
                 break
@@ -386,8 +535,6 @@ class Game:
             self.ball.trail.append((self.ball.x, self.ball.y_screen))
             if len(self.ball.trail) > 16:
                 self.ball.trail.pop(0)
-        if self.show_pred and self.ball.live:
-            self.pred_x = self.ai.predict(self.ball)
 
     # ---------- 绘制 ----------
     def draw_court(self, s):
@@ -404,6 +551,10 @@ class Game:
             pygame.draw.line(s, (152, 160, 156), (NET_X - 8, y), (NET_X + 8, y), 1)
         pygame.draw.rect(s, (250, 250, 245), (NET_X - 10, top - 5, 20, 6))
         pygame.draw.line(s, (72, 82, 94), (NET_X, top), (NET_X, FLOOR_Y), 3)
+        # 发球线（距网 SERVICE_LINE px，两条短线 + 小标签）
+        for x in (int(NET_X - SERVICE_LINE), int(NET_X + SERVICE_LINE)):
+            pygame.draw.line(s, (250, 214, 120), (x, FLOOR_Y - 26), (x, FLOOR_Y), 3)
+            pygame.draw.line(s, (250, 214, 120), (x - 10, FLOOR_Y - 26), (x + 10, FLOOR_Y - 26), 2)
 
     def player_tip_at(self, p, q):
         """挥拍进度 q 处的拍头位置（给残影用，与 hand()/racket_dir() 同一套几何）。"""
@@ -412,6 +563,12 @@ class Game:
         th = hi + (lo - hi) * q
         return (p.x + p.facing * (hx + math.cos(th) * RACKET_LEN),
                 p.feet_y + hy - math.sin(th) * RACKET_LEN)
+
+    def set_speed(self, k):
+        """球速倍率：直接改 physics 的速度表（resolve_hit 仍按同一张表算，物理自洽）。"""
+        physics.V_MIN = 380.0 * k
+        physics.V_MAX = 820.0 * k
+        self.speed_scale = k
 
     def ready_key(self, p):
         """现在该摆哪套准备姿势：要发球、或来球已经低于腰 → 低姿势（等挑球）。"""
@@ -430,13 +587,17 @@ class Game:
             key = self.ready_key(p)
             hand, th = HAND_READY[key], THETA_READY[key]
             free_hand = FREE_READY[key]
+            # 收拍过渡：从刚收拍的姿势平滑走回准备姿势（发球后拍子自然举起来变成架拍）
+            if p.recover_hand is not None and p.recover_t < RECOVER_DUR:
+                k = p.recover_t / RECOVER_DUR
+                k = k * k * (3.0 - 2.0 * k)
+                hand = (p.recover_hand[0] + (hand[0] - p.recover_hand[0]) * k,
+                        p.recover_hand[1] + (hand[1] - p.recover_hand[1]) * k)
+                th = p.recover_theta + (th - p.recover_theta) * k
         draw_character(s, p.char, int(p.x), int(p.feet_y),
                        "right" if p.facing > 0 else "left", SCALE,
                        racket_theta=th, hand=hand, free_hand=free_hand,
                        racket_len=DRAW_RACKET_LEN)
-        if not self.ball.live and p.side == self.server and not self.over:
-            # 发球前另一只手在腰侧托着球（低姿势那张参考图）
-            draw_shuttle(s, (int(p.x - p.facing * 18), int(p.feet_y - 104)), math.pi / 2)
         if swinging:                                    # 白色残影：拍头最近扫过的轨迹
             q1 = p.swing_q()
             q0 = max(0.0, q1 - 0.30)
@@ -449,15 +610,27 @@ class Game:
                        int(WALL[2] + (255 - WALL[2]) * f))
                 pygame.draw.line(s, col, pts[k], pts[k + 1], 2)
 
+    def mode_label(self):
+        """当前模式的大字（画在球场背景上当水印）。"""
+        if not self.race:
+            return "ENDLESS"
+        if self.classic:
+            return "CLASSIC"
+        return "FIRST TO 7"
+
     def draw(self, s, fonts):
         self.draw_court(s)
-        if self.show_pred and self.pred_x is not None and self.ball.live:
-            pygame.draw.line(s, (242, 202, 72), (int(self.pred_x), FLOOR_Y - 14),
-                             (int(self.pred_x), FLOOR_Y), 3)
-            pygame.draw.circle(s, (242, 202, 72), (int(self.pred_x), FLOOR_Y - 16), 5, 2)
+        # 背景水印：当前模式（对战界面一眼能看出这局是什么模式）
+        mark = fonts["title"].render(self.mode_label(), True, (222, 230, 226))
+        if mark.get_width() > 760:
+            k = 760.0 / mark.get_width()
+            mark = pygame.transform.smoothscale(mark, (760, int(mark.get_height() * k)))
+        mark.set_alpha(110)
+        s.blit(mark, mark.get_rect(center=(W // 2, 300)))
         self.draw_player(s, self.human)
         self.draw_player(s, self.ai_p)
-        if self.ball.live or not self.over:
+        # 只有球在飞、或已经落地（y<=0）时才画；发球前那个停在半空的初始球不画（用户：「幽灵球」）
+        if self.ball.live or self.ball.y <= 0.01:
             trail = [(x, y, 2 + 5 * i / 15, i / 15)
                      for i, (x, y) in enumerate(self.ball.trail)]
             draw_trail(s, trail)
@@ -469,26 +642,80 @@ class Game:
         pygame.draw.rect(s, (58, 58, 62), rect, 2)
         t = fonts["score"].render(f"{self.score[0]} - {self.score[1]}", True, (246, 44, 34))
         s.blit(t, t.get_rect(center=rect.center))
-        hint = fonts["small"].render("Arrows/AD move  Up/W jump  Space swing  P pause  Tab predict  Esc quit",
-                                     True, (246, 246, 240))
-        s.blit(hint, (12, H - 24))
+        pygame.draw.rect(s, (22, 22, 26), (0, H - 38, W, 38))       # 底部键位条（加高，键帽样式）
+        pygame.draw.line(s, (58, 60, 66), (0, H - 38), (W, H - 38), 1)
+        hf = fonts.get("hint") or fonts["small"]
+        draw_hints(s, hf, [("←/→  A/D", "move"), ("↑  W", "jump"), ("SPACE", "swing / serve"),
+                           ("P", "pause"), ("F1", "debug"), ("ESC", "quit")],
+                   14, H - 38 + 9)
         if not self.race:
-            t = fonts["small"].render("PRACTICE - no target score", True, (250, 226, 150))
-            s.blit(t, (W - t.get_width() - 12, H - 24))
+            txt, col = "ENDLESS - no target score", (250, 226, 150)
+        elif self.classic:
+            txt = (f"MATCH   [{self.games[0]}-{self.games[1]}]" if self.over else
+                   f"GAME {self.game_no}   FIRST TO {WIN_SCORE}   [{self.games[0]}-{self.games[1]}]")
+            col = (232, 236, 230)
+        else:
+            txt, col = f"FIRST TO {WIN_SCORE}", (232, 236, 230)
+        t = hf.render(txt, True, col)
+        s.blit(t, (W - t.get_width() - 14, H - 38 + 10))
+        if self.serve_msg:                              # 发球提示（该按空格 / 站太靠前）
+            a = 0.6 + 0.4 * abs(math.sin(pygame.time.get_ticks() / 320.0))
+            t = fonts["mid"].render(self.serve_msg, True,
+                                    (int(250 * a), int(226 * a), int(150 * a)))
+            s.blit(t, t.get_rect(center=(W // 2, H - 68)))
         if self.paused:
             t = fonts["big"].render("PAUSED", True, (248, 248, 244))
             s.blit(t, t.get_rect(center=(W // 2, H // 2)))
         if self.over:
-            msg = "YOU WIN!" if self.score[0] > self.score[1] else "AI WINS"
+            if self.classic:
+                msg = "YOU WIN THE MATCH!" if self.games[0] > self.games[1] else "AI WINS THE MATCH"
+                sub = f"games {self.games[0]}-{self.games[1]}"
+            else:
+                msg = "YOU WIN!" if self.score[0] > self.score[1] else "AI WINS"
+                sub = f"{self.score[0]}-{self.score[1]}"
             t = fonts["big"].render(msg, True, (242, 202, 72))
-            s.blit(t, t.get_rect(center=(W // 2, H // 2 - 20)))
+            s.blit(t, t.get_rect(center=(W // 2, H // 2 - 26)))
+            t0 = fonts["small"].render(sub, True, (238, 238, 232))
+            s.blit(t0, t0.get_rect(center=(W // 2, H // 2 + 4)))
             t2 = fonts["small"].render("Enter: back to select   Esc: quit", True, (246, 246, 240))
-            s.blit(t2, t2.get_rect(center=(W // 2, H // 2 + 20)))
+            s.blit(t2, t2.get_rect(center=(W // 2, H // 2 + 28)))
+        if self.banner_t > 0 and self.banner:            # 中央提示画在最上层：GAME n / OUT!
+            a = min(1.0, self.banner_t / 0.4)
+            base = self.banner_rgb
+            cy = H // 2 - (112 if self.over else 60)    # 结束屏也在中间，让开一点
+            t = fonts["big"].render(self.banner, True,
+                                    (int(base[0] * a + 40 * (1 - a)),
+                                     int(base[1] * a + 40 * (1 - a)),
+                                     int(base[2] * a + 40 * (1 - a))))
+            s.blit(t, t.get_rect(center=(W // 2, cy)))
+            if self.banner_sub:
+                t1 = fonts["mid"].render(self.banner_sub, True,
+                                         (int(246 * a + 40 * (1 - a)),
+                                          int(246 * a + 40 * (1 - a)),
+                                          int(240 * a + 40 * (1 - a))))
+                s.blit(t1, t1.get_rect(center=(W // 2, cy + 34)))
+        if self.debug:                                  # 默认关：排查输入/判定用（F1 打开）
+            hp = self.human
+            lines = [
+                f"keys: {self.last_key!r}  space={self.keys_now.get('space')}  swing {hp.swing_t:+.2f} ({hp.swing_type})  hits {self.hits}",
+                f"ball live={self.ball.live} x={self.ball.x:6.1f} y={self.ball.y:5.1f} vx={self.ball.vx:6.0f}",
+                f"player x={hp.x:6.1f} paused={self.paused} over={self.over} race={self.race} speed x{self.speed_scale:.1f} zoom {ZOOM:.2f}",
+            ]
+            for i, ln in enumerate(lines):
+                t = fonts["small"].render(ln, True, (255, 250, 200))
+                s.blit(t, (12, 84 + 18 * i))
 
 
-def select_screen(screen, fonts):
-    """3×4 网格 + 左侧大图；方向键选择，回车开始。返回玩家角色。"""
+def select_screen(win, world, fonts):
+    """设置界面：3×4 网格 + 左侧大图 + 顶部四个设置框（模式 / 球速 / 窗口）。
+    方向键选人、M 切模式、S 改球速、- / = 改窗口大小、回车开始。返回 (角色, 模式, 球速)。"""
+    global ZOOM
+    screen = world                  # 选择界面也按世界坐标画，最后整体缩放
     sel = 0
+    modes = [("endless", "ENDLESS", "no target score"),
+             ("classic", "CLASSIC", "best of 3 · first to 7")]
+    mi = 0
+    spd = SPEED_DEFAULT
     clock = pygame.time.Clock()
     while True:
         for e in pygame.event.get():
@@ -498,7 +725,15 @@ def select_screen(screen, fonts):
                 if e.key == pygame.K_ESCAPE:
                     return None
                 if e.key == pygame.K_RETURN:
-                    return CHARACTERS[sel]
+                    return CHARACTERS[sel], modes[mi][0], spd
+                if e.key in (pygame.K_m, pygame.K_TAB):
+                    mi = (mi + 1) % len(modes)
+                if e.key == pygame.K_s:                       # 球速档位 2~5
+                    spd = spd + 1.0 if spd < 5.0 else 2.0
+                if e.key in (pygame.K_MINUS, pygame.K_KP_MINUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
+                    step = 0.05 if e.key in (pygame.K_EQUALS, pygame.K_KP_PLUS) else -0.05
+                    ZOOM = max(ZOOM_MIN, min(ZOOM_MAX, ZOOM + step))
+                    win = pygame.display.set_mode(window_size())
                 if e.key == pygame.K_RIGHT:
                     sel = (sel + 1) % 12
                 if e.key == pygame.K_LEFT:
@@ -508,8 +743,20 @@ def select_screen(screen, fonts):
                 if e.key == pygame.K_UP:
                     sel = (sel - 3) % 12
         screen.fill((18, 20, 24))
-        screen.blit(fonts["big"].render("CHOOSE YOUR CHARACTER", True, (236, 238, 232)), (24, 14))
-        gx, gy, cw, ch, gap = 330, 62, 182, 100, 6
+        screen.blit(fonts["mid"].render("CHOOSE YOUR CHARACTER", True, (236, 238, 232)), (24, 16))
+        # 顶部四个设置框：模式 ×2、球速档位、窗口大小
+        boxes = [(f"{label}", sub, k == mi) for k, (_mid, label, sub) in enumerate(modes)]
+        boxes.append((f"SPEED {spd:.0f}x", "press S", True))
+        boxes.append((f"WINDOW {int(round(ZOOM * 100))}%", "press - / =", True))
+        for k, (label, sub, on) in enumerate(boxes):
+            r = pygame.Rect(330 + k * 172, 8, 164, 44)
+            pygame.draw.rect(screen, (58, 62, 54) if on else (38, 40, 46), r)
+            pygame.draw.rect(screen, (242, 202, 72) if on else (92, 94, 100), r, 3 if on else 1)
+            lb = fonts["mid"].render(label, True, (244, 226, 150) if on else (168, 172, 168))
+            screen.blit(lb, lb.get_rect(center=(r.centerx, r.centery - 7)))
+            sb = fonts["small"].render(sub, True, (168, 172, 168) if on else (120, 124, 122))
+            screen.blit(sb, sb.get_rect(center=(r.centerx, r.centery + 12)))
+        gx, gy, cw, ch, gap = 330, 58, 182, 96, 6
         for i, c in enumerate(CHARACTERS):
             col, row = i % 3, i // 3
             r = pygame.Rect(gx + col * (cw + gap), gy + row * (ch + gap), cw, ch)
@@ -522,44 +769,87 @@ def select_screen(screen, fonts):
         c = CHARACTERS[sel]
         draw_character(screen, c, 150, 330, "right", 1.15)
         n = fonts["mid"].render(c["name"], True, (236, 238, 232))
-        screen.blit(n, n.get_rect(center=(150, 352)))
+        screen.blit(n, n.get_rect(center=(150, 344)))
         good, bad = pros_cons(c)
         t = fonts["small"].render(f"{good} / {bad}", True, (156, 162, 158))
-        screen.blit(t, t.get_rect(center=(150, 376)))
+        screen.blit(t, t.get_rect(center=(150, 366)))
         nm = normalize(c)
         for j, (key, val) in enumerate([("SPEED", str(c["speed"])),
                                         ("POWER", f"{c['power']:.2f}"),
                                         ("JUMP", str(c["jump"]))]):
-            y = 398 + j * 24
+            y = 384 + j * 22
             screen.blit(fonts["small"].render(key, True, (156, 162, 158)), (40, y))
             filled = 1 + round(nm[key.lower()] * 7)
             for i in range(8):
                 col = tuple(min(255, v + 80) for v in c["accent"]) if i < filled else (54, 56, 62)
                 pygame.draw.rect(screen, col, (100 + i * 15, y + 3, 12, 10))
             screen.blit(fonts["small"].render(val, True, (176, 180, 176)), (228, y))
-        screen.blit(fonts["small"].render("ARROWS select   ENTER start   Esc quit",
-                                          True, (156, 162, 158)), (330, H - 22))
-        pygame.display.flip()
+        pygame.draw.rect(screen, (22, 22, 26), (0, H - 38, W, 38))
+        pygame.draw.line(screen, (58, 60, 66), (0, H - 38), (W, H - 38), 1)
+        draw_hints(screen, fonts.get("hint") or fonts["small"],
+                   [("←/→", "select"), ("M", "mode"), ("S", "speed"),
+                    ("- / =", "window"), ("ENTER", "start"), ("ESC", "quit")],
+                   gx, H - 38 + 9)
+        present(win, world)
+        clock.tick(60)
+
+
+def start_screen(win, world, fonts):
+    """开始界面：只有标题和「按任意键进入」，按任意键/点一下进设置（选人+模式）界面。"""
+    clock = pygame.time.Clock()
+    t = 0.0
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                return False
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE:
+                    return False
+                return True
+            if e.type == pygame.MOUSEBUTTONDOWN:
+                return True
+        t += 1.0 / 60.0
+        world.fill((16, 18, 22))
+        pygame.draw.rect(world, (44, 46, 52), (-20, FLOOR_Y, W + 40, H - FLOOR_Y + 20))
+        pygame.draw.line(world, (86, 90, 96), (-20, FLOOR_Y), (W + 20, FLOOR_Y), 2)
+        for i, (ch, x, face) in enumerate([(CHARACTERS[8], W * 0.26, "right"),
+                                           (CHARACTERS[1], W * 0.74, "left")]):
+            draw_character(world, ch, x, FLOOR_Y + 2, face, 1.0,
+                           racket_theta=THETA_READY["hi"], hand=HAND_READY["hi"],
+                           free_hand=FREE_READY["hi"], racket_len=DRAW_RACKET_LEN)
+        title = fonts["title"].render("NEURAL BADMINTON", True, (242, 202, 72))
+        world.blit(title, title.get_rect(center=(W // 2, 88)))
+        sub = fonts["small"].render("physics simulated in NumPy   ·   neural landing predictor", True, (150, 156, 152))
+        world.blit(sub, sub.get_rect(center=(W // 2, 140)))
+        a = 0.55 + 0.45 * abs(math.sin(t * 2.0))
+        pr = fonts["mid"].render("press any key or click to start", True,
+                                 (int(236 * a), int(238 * a), int(232 * a)))
+        world.blit(pr, pr.get_rect(center=(W // 2, H - 92)))
+        present(win, world)
         clock.tick(60)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true", help="双 AI 自动对打 30 s 后退出")
-    ap.add_argument("--race", action="store_true", help="7 分制（默认练习模式，不限分一直打）")
+    ap.add_argument("--practice", action="store_true", help="练习模式（不限分一直打；默认是 7 分制）")
+    ap.add_argument("--race", action="store_true", help=argparse.SUPPRESS)   # 旧参数，保留兼容
     args = ap.parse_args()
 
     pygame.init()
-    screen = pygame.display.set_mode((W, H))
+    world = pygame.Surface((W, H))
+    screen = pygame.display.set_mode(window_size())
     pygame.display.set_caption("Neural Badminton")
-    fonts = {"score": pygame.font.SysFont("consolas", 40, bold=True),
+    fonts = {"title": pygame.font.SysFont("segoeui", 56, bold=True),
+             "hint": pygame.font.SysFont("segoeui", 16, bold=True),
+             "score": pygame.font.SysFont("consolas", 40, bold=True),
              "big": pygame.font.SysFont("segoeui", 34, bold=True),
              "mid": pygame.font.SysFont("segoeui", 22, bold=True),
              "small": pygame.font.SysFont("segoeui", 14)}
     clock = pygame.time.Clock()
 
     if args.smoke:
-        game = Game(CHARACTERS[8], CHARACTERS[1], smoke=True)   # Bun vs Rex
+        game = Game(CHARACTERS[8], CHARACTERS[1], smoke=True, race=False)   # Bun vs Rex（冒烟跑满 30 s，不限分）
         frames, t0 = 0, pygame.time.get_ticks()
         fps_min = 999
         while pygame.time.get_ticks() - t0 < 30000 and not game.over:
@@ -567,8 +857,8 @@ def main():
                 if e.type == pygame.QUIT:
                     break
             game.update(1 / 60, {})
-            game.draw(screen, fonts)
-            pygame.display.flip()
+            game.draw(world, fonts)
+            present(screen, world)
             clock.tick(60)
             frames += 1
             if frames > 60:
@@ -580,12 +870,20 @@ def main():
         pygame.quit()
         return
 
+    if not start_screen(screen, world, fonts):     # 开始界面 → 再进设置（选人+模式）
+        pygame.quit()
+        return
+
     while True:
-        p_char = select_screen(screen, fonts)
-        if p_char is None:
+        picked = select_screen(screen, world, fonts)
+        if picked is None:
             break
+        p_char, mode, spd = picked
+        if args.practice:                       # 命令行强制无限练习
+            mode = "endless"
         idx = CHARACTERS.index(p_char)
-        game = Game(p_char, CHARACTERS[(idx + 6) % 12], race=args.race)
+        game = Game(p_char, CHARACTERS[(idx + 6) % 12],
+                    race=(mode != "endless"), classic=(mode == "classic"), speed=spd)
         keys = {}
         while True:
             for e in pygame.event.get():
@@ -598,22 +896,27 @@ def main():
                         return
                     if e.key == pygame.K_p:
                         game.paused = not game.paused
-                    if e.key == pygame.K_TAB:
-                        game.show_pred = not game.show_pred
+                    if e.key == pygame.K_F1:
+                        game.debug = not game.debug
+                    game.last_key = pygame.key.name(e.key)
                     if e.key == pygame.K_RETURN and game.over:
                         break
-                    keys[{pygame.K_a: "a", pygame.K_d: "d", pygame.K_w: "w",
-                          pygame.K_LEFT: "a", pygame.K_RIGHT: "d", pygame.K_UP: "w",
-                          pygame.K_SPACE: "space"}.get(e.key, "")] = True
                 if e.type == pygame.KEYUP:
-                    keys[{pygame.K_a: "a", pygame.K_d: "d", pygame.K_w: "w",
-                          pygame.K_LEFT: "a", pygame.K_RIGHT: "d", pygame.K_UP: "w",
-                          pygame.K_SPACE: "space"}.get(e.key, "")] = False
+                    pass                            # 按住状态改用 get_pressed() 轮询，见下
             else:
+                # 按键状态用轮询（不依赖 KEYDOWN/KEYUP 事件，少受输入法/焦点影响）
+                pk = pygame.key.get_pressed()
+                keys = {
+                    "a": bool(pk[pygame.K_a] or pk[pygame.K_LEFT]),
+                    "d": bool(pk[pygame.K_d] or pk[pygame.K_RIGHT]),
+                    "w": bool(pk[pygame.K_w] or pk[pygame.K_UP]),
+                    "space": bool(pk[pygame.K_SPACE]),
+                }
+                game.keys_now = keys
                 try:
                     game.update(1 / 60, keys)
-                    game.draw(screen, fonts)
-                    pygame.display.flip()
+                    game.draw(world, fonts)
+                    present(screen, world)
                 except Exception:                     # 有 bug 时别让窗口卡死：写日志 + 暂停
                     import traceback
                     tb = traceback.format_exc()
@@ -632,3 +935,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
