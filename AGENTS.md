@@ -16,7 +16,7 @@
 ## 1. 文件边界
 
 - **可改**：`game.py`、`characters.py`、`game_style_preview.py`、`character_select_preview.py`、`docs/` 游戏相关图、`进展记录.md`、桌面交接文件。
-- **不可改**：`network.py`、`physics.py`、`data.py`、`train.py`、`experiment*.py`、`gradients.py`、`tests/`、`make_shots.py`、`shots.npz`。需要动物理或网络 → 停下来告诉用户转 Qoder。
+- **不可改**：`network.py`、`physics.py`、`data.py`、`train.py`、`experiment*.py`、`gradients.py`、`tests/`、`make_shots.py`、`shots.npz`、`landing.py`、`landing_baseline.py`。需要动物理或网络 → 停下来告诉用户转 Qoder。
 - **接口契约**：`game.py:156` `AIController.predict(self, ball)` 保持签名与语义（返回落点 x）。现在内部是模拟器占位；**11-28 由 Qoder 换成落点网络**，不要重构掉这个接口。
 
 ## 2. 固定设计规则（用户已定，不许回退）
@@ -28,12 +28,12 @@
 - 无风，但**空气阻力必须可见**：二次阻力 k=0.0025，与 `physics.py` 同方程、240 Hz 子步（dt=1/240）。
 - 接触判定 = 球到拍杆线段（手→拍头）距离 < 34 px，s 为投影；不能连击自己刚打出的球。
 - AI 状态机 RECOVER→WAIT→CHASE→SWING；**球已过网或快球允许从 RECOVER/WAIT 直接 CHASE**（踩过的坑：走完回位才追永远接不到）。已定标：起挥距离 120、站位偏移 25。
-- **物理事实，不是 bug**：二次阻力下最大射程 ~345 px < 半场 450 px，深区击球必不过网 → 玩法天然要求向前跑位；AI 回位点不能太深。不要改物理去「修」它。
+- **物理结论更新（11-19）**：早期「二次阻力下最大射程 ~345 px < 半场 450，深区必不过网」是**原速（380/820）**下的发现；11-17 起多次提速、11-19 已到 `V_MIN/V_MAX = 1520/3280`（4 倍），深区也能过网，旧结论作废。不要改物理去「修」射程；AI 回位深度只作为手感调参，现状以 `进展记录.md` 第十二节为准。
 
 ## 3. 运行与验证（本机实测过的命令）
 
 - 一律用项目 venv：`.venv/Scripts/python.exe`。**全局 D:\Python 没有 pygame**，用错解释器会 ModuleNotFoundError。
-- 测试：`.venv/Scripts/python.exe -m unittest discover -s tests`（35 例，应全绿）。
+- 测试：`.venv/Scripts/python.exe -m unittest discover -s tests`（60 例，应全绿；含落点网络与线性基线，全部只用合成数据，不训练真实数据）。
 - 自动对打：`.venv/Scripts/python.exe game.py --smoke`（30 s，看 fps 与 hits/rally；基线 60.4 fps、9 次/回合）。
 - 画面改动：pygame 可无窗口渲染 `Surface` 存 png 到 `docs/`，然后 Read 目检（挥拍动画就是这么验的）。
 - 实玩由**用户在 PyCharm 跑 `game.py` 并贴反馈**；你负责改代码与自测，不要替用户「玩」。
