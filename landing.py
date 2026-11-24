@@ -118,8 +118,32 @@ def load_dataset(path="shots.npz"):
 
 
 def predict_landing_px(X, parameters):
-    """归一化输入 → 落点像素坐标，供 11-28 游戏内 predict() 调用。"""
+    """归一化输入 → 落点像素坐标，供 11-28 游戏内 predict() 调用。
+
+    注意：只适用于未做 z-score 标准化的参数。train_landing.py 训出的
+    landing_model.npz 带训练集标准化统计量，请用 load_model + predict_with_model。
+    """
     return forward(X, parameters) * COURT_W
+
+
+def load_model(path="landing_model.npz"):
+    """读 train_landing.py 保存的模型，返回 (parameters, norm)。
+
+    norm 里有训练集的标准化统计量（x_mean/x_std/y_mean/y_std）与 court_w，
+    推理时必须用同一套统计量，否则输入分布对不上。
+    """
+    d = np.load(path)
+    parameters = {k: d[k] for k in ("W1", "b1", "W2", "b2")}
+    norm = {"x_mean": d["x_mean"], "x_std": d["x_std"],
+            "y_mean": float(d["y_mean"]), "y_std": float(d["y_std"]),
+            "court_w": float(d["court_w"])}
+    return parameters, norm
+
+
+def predict_with_model(X, parameters, norm):
+    """游戏推理入口：归一化输入 X(n,8)（÷COURT_W）→ 落点像素坐标。"""
+    z = forward((X - norm["x_mean"]) / norm["x_std"], parameters)
+    return (z * norm["y_std"] + norm["y_mean"]) * norm["court_w"]
 
 
 # 合成数据自检：答案已知的函数，不碰 shots.npz

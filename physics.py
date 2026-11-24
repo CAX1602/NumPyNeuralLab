@@ -7,7 +7,7 @@
 
 击球模型（与进展记录一致，数值 11-21 试玩再调）：
     resolve_hit(theta, s, power) -> (v0, launch_angle)
-    - launch_angle = theta（拍角直接决定出射角；越向下越尖）
+    - launch_angle = launch_angle(theta)：拍角减去非线性下压（11-24 起与 game.py 同公式）
     - v_base 随 theta 单调递减（越向下基础速度越大）
     - v0 = v_base(theta) * lever(s) * power，lever(s) = 0.6 + 0.4*s
 阻力：二次阻力 a_drag = -k * |v| * v（无风）。k 固定公开，轨迹明显偏离真空抛体。
@@ -18,7 +18,7 @@ import numpy as np
 # --- 场地 / 物理常量（像素单位， provisional，11-21 定标） ---
 GRAVITY = 1800.0        # px/s^2，与 characters.py 一致
 DRAG_K = 0.0025         # 二次阻力系数（1/px），固定公开
-COURT_W = 900.0         # 场地宽
+COURT_W = 1200.0        # 场地宽（11-23 游戏加宽 900→1200，11-24 数据生成器对齐）
 NET_X = COURT_W / 2     # 网的位置
 NET_HEIGHT = 150.0      # 网高（离地），仅游戏规则用，落点模拟不撞网
 DT = 1.0 / 240.0        # 积分步长
@@ -39,8 +39,18 @@ THETA_MAX = max(hi for _, hi in SWING_THETA.values())
 # 现在把挥拍手位改成「架拍 → 瞬间落到胸前」，击球点降到 40° 左右（真实头顶挥拍的角度），
 # 同一套速度下滞空只有 ~1.0 s，落点仍在中后场。
 # 11-19 用户仍觉得慢（「球速太慢」）→ 再上调到 4 倍（原 380/820 的 4 倍）。
-V_MIN = 1520.0
-V_MAX = 3280.0
+# 11-24 用户拍板「球速定在 5 档，不动了」→ 默认值与游戏 5 档（380×5 / 820×5）对齐，
+# 这样 make_shots.py 采出来的数据分布才和游戏里实际打的一致。
+V_MIN = 1900.0
+V_MAX = 4100.0
+
+# 出球角非线性下压（11-24 与 game.py try_contact 完全同公式；两边必须同步改）：
+#   angle = theta - LAUNCH_TILT - LAUNCH_SHARP * low^2，low = clip((KNEE-theta)/0.50, 0, 1)
+# 效果：头顶（theta≈0.9）出球约 22°；拍面越平，追加的下压越狠；最低夹到 -0.61 rad ≈ -35°。
+LAUNCH_TILT = 0.50
+LAUNCH_KNEE = 1.00
+LAUNCH_SHARP = 0.45
+LAUNCH_MIN = -0.61
 
 # 观察窗：前 0.15 s，取 4 帧（0 / 0.05 / 0.10 / 0.15 s）× 2 坐标 = 8 输入
 OBS_STEPS = (0, 12, 24, 36)   # DT=1/240 时对应 0/0.05/0.10/0.15 s
@@ -58,20 +68,27 @@ def v_base(theta):
     return V_MAX + (V_MIN - V_MAX) * frac
 
 
+def launch_angle(theta):
+    """出射角：拍面角 − 常数下压 − 低拍角平方追加下压，最低 LAUNCH_MIN。"""
+    theta = np.asarray(theta, dtype=float)
+    low = np.clip((LAUNCH_KNEE - theta) / 0.50, 0.0, 1.0)
+    return np.maximum(theta - LAUNCH_TILT - LAUNCH_SHARP * low * low, LAUNCH_MIN)
+
+
 def resolve_hit(theta, s, power):
     """击球判定：返回 (初速度 v0, 出射角 angle)。可单测。"""
     theta = np.asarray(theta, dtype=float)
     v0 = v_base(theta) * lever(s) * np.asarray(power, dtype=float)
-    return v0, theta
+    return v0, launch_angle(theta)
 
 
 def simulate_batch(x0, y0, v0, angle, direction,
                    drag_k=DRAG_K, dt=DT, max_t=MAX_T):
     """批量积分一批球，返回 (landing_x, flight_time, obs)。
 
-    obs 形状 (n, 4, 2)：前 0.15 s 的 4 帧 (x, y)；落地后的帧保留最后一帧
-    （即按实际可用帧截断）。landing_x 为首次 y<=0 的插值落点；未落地为 nan。
-    direction=+1 向 +x 打，-1 向 -x 打。
+    obs 形状 (n, 4, 2)：前 0.15 s 的 4 帧 (x, y)；球在观察窗内落地时，
+    落地后的帧记录为落点静止位置 (landing_x, 0)——球落地就不动了。
+    landing_x 为首次 y<=0 的插值落点；未落地为 nan。direction=+1 向 +x 打，-1 向 -x 打。
     """
     x0 = np.asarray(x0, dtype=float)
     y0 = np.asarray(y0, dtype=float)
@@ -84,6 +101,8 @@ def simulate_batch(x0, y0, v0, angle, direction,
     vel = np.stack([v0 * np.cos(angle) * direction,
                     v0 * np.sin(angle)], axis=1)
     active = np.ones(n, dtype=bool)
+    landed = np.zeros(n, dtype=bool)
+    rest = np.zeros_like(pos)           # 落地后的静止位置 (landing_x, 0)
     landing = np.full(n, np.nan)
     ftime = np.full(n, np.nan)
     obs = np.zeros((n, len(OBS_STEPS), 2))
@@ -91,12 +110,13 @@ def simulate_batch(x0, y0, v0, angle, direction,
 
     steps = int(max_t / dt) + 1
     for step in range(steps):
-        if not active.any():
+        if not active.any() and step > max(OBS_STEPS):
             break
-        # 先记录当前帧（t = step*dt），再积分，保证第 0 帧就是击球点
+        # 先记录当前帧（t = step*dt），再积分，保证第 0 帧就是击球点；
+        # 已落地的球记录静止位置，而不是把后续帧留成 (0,0)
         if step in OBS_STEPS:
             idx = OBS_STEPS.index(step)
-            obs[active, idx, :] = pos[active]
+            obs[:, idx, :] = np.where(landed[:, None], rest, pos)
         prev = pos.copy()
         speed = np.linalg.norm(vel, axis=1)
         acc = -drag_k * speed[:, None] * vel
@@ -111,7 +131,10 @@ def simulate_batch(x0, y0, v0, angle, direction,
             frac = py / (py - cy)
             landing[cross] = prev[cross, 0] + frac * (pos[cross, 0] - prev[cross, 0])
             ftime[cross] = step * dt
+            rest[cross] = np.stack(
+                [landing[cross], np.zeros(int(cross.sum()))], axis=1)
             active[cross] = False
+            landed[cross] = True
 
     return landing, ftime, obs
 

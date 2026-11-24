@@ -16,7 +16,7 @@
 ## 1. 文件边界
 
 - **可改**：`game.py`、`characters.py`、`game_style_preview.py`、`character_select_preview.py`、`docs/` 游戏相关图、`进展记录.md`、桌面交接文件。
-- **不可改**：`network.py`、`physics.py`、`data.py`、`train.py`、`experiment*.py`、`gradients.py`、`tests/`、`make_shots.py`、`shots.npz`、`landing.py`、`landing_baseline.py`。需要动物理或网络 → 停下来告诉用户转 Qoder。
+- **不可改**：`network.py`、`physics.py`、`data.py`、`train.py`、`experiment*.py`、`gradients.py`、`tests/`、`make_shots.py`、`shots.npz`、`landing.py`、`landing_baseline.py`、`train_landing.py`、`landing_model.npz`。需要动物理或网络 → 停下来告诉用户转 Qoder。
 - **接口契约**：`game.py:156` `AIController.predict(self, ball)` 保持签名与语义（返回落点 x）。现在内部是模拟器占位；**11-28 由 Qoder 换成落点网络**，不要重构掉这个接口。
 
 ## 2. 固定设计规则（用户已定，不许回退）
@@ -33,7 +33,8 @@
 ## 3. 运行与验证（本机实测过的命令）
 
 - 一律用项目 venv：`.venv/Scripts/python.exe`。**全局 D:\Python 没有 pygame**，用错解释器会 ModuleNotFoundError。
-- 测试：`.venv/Scripts/python.exe -m unittest discover -s tests`（60 例，应全绿；含落点网络与线性基线，全部只用合成数据，不训练真实数据）。
+- 测试：`.venv/Scripts/python.exe -m unittest discover -s tests`（65 例，应全绿；含落点网络与线性基线）。
+- **落点网络已训练（11-24）**：`landing_model.npz` test RMSE 14.58 px。游戏侧若要提前接 `predict()`，用 `landing.load_model()` + `predict_with_model(X, params, norm)`（X = 4 帧观测 ÷1200 展平），不要自己手写前向。
 - 自动对打：`.venv/Scripts/python.exe game.py --smoke`（30 s，看 fps 与 hits/rally；基线 60.4 fps、9 次/回合）。
 - 画面改动：pygame 可无窗口渲染 `Surface` 存 png 到 `docs/`，然后 Read 目检（挥拍动画就是这么验的）。
 - 实玩由**用户在 PyCharm 跑 `game.py` 并贴反馈**；你负责改代码与自测，不要替用户「玩」。

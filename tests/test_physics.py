@@ -12,10 +12,25 @@ from physics import (
 
 
 class TestResolveHit(unittest.TestCase):
-    def test_angle_equals_theta(self):
+    def test_launch_angle_matches_game_formula(self):
+        # 与 game.py try_contact 同一公式：angle = θ − 0.50 − 0.45·low²，最低 −0.61
         theta = np.linspace(THETA_MIN, THETA_MAX, 11)
         v0, angle = resolve_hit(theta, 0.5, 1.0)
-        self.assertTrue(np.allclose(angle, theta))
+        low = np.clip((1.00 - theta) / 0.50, 0.0, 1.0)
+        expected = np.maximum(theta - 0.50 - 0.45 * low * low, -0.61)
+        self.assertTrue(np.allclose(angle, expected))
+        self.assertTrue(np.all(angle <= theta))   # 只会比拍面角更下压
+
+    def test_launch_angle_hand_value(self):
+        # 手算：θ=0.9 → low=0.2 → 0.9 − 0.5 − 0.45·0.04 = 0.382 rad ≈ 21.9°
+        _, angle = resolve_hit(0.9, 1.0, 1.0)
+        self.assertAlmostEqual(float(angle), 0.382, places=6)
+
+    def test_launch_angle_monotonic_and_floor(self):
+        theta = np.linspace(THETA_MIN, THETA_MAX, 101)
+        _, angle = resolve_hit(theta, 0.5, 1.0)
+        self.assertTrue(np.all(np.diff(angle) >= 0))
+        self.assertTrue(np.all(angle >= -0.61))
 
     def test_speed_decreases_with_theta(self):
         theta = np.linspace(THETA_MIN, THETA_MAX, 11)
@@ -56,15 +71,14 @@ class TestDrag(unittest.TestCase):
 
 class TestSimulateBatch(unittest.TestCase):
     def setUp(self):
-        # 只取保证过网的参数区间。二次阻力下全场最大射程约 345 px，
-        # 本参数盒（高弧、700–820 px/s）最小射程约 174 px（角点 1.1/700/120），
-        # 所以击球点必须靠近网：x0 >= 320 时落点 >= 494 > 450。
+        # 只取保证过网的参数区间（11-24 按 5 档球速 + 1200 场宽重定标）：
+        # 高弧（出射角 0.8–1.1）、1500–2000 px/s，最小射程也足够从 x0=320 过网；
         # 低平/软球或深区击球本来就可能落本方半场，那是合法物理，不在此用例范围。
         n = 32
         rng = np.random.default_rng(0)
         self.x0 = rng.uniform(320, NET_X - 60, n)
         self.y0 = rng.uniform(120, 260, n)
-        self.v0 = rng.uniform(700, 820, n)
+        self.v0 = rng.uniform(1500, 2000, n)
         self.angle = rng.uniform(0.8, 1.1, n)
         self.dir = np.ones(n)
 
@@ -94,6 +108,18 @@ class TestSimulateBatch(unittest.TestCase):
         lm, _, _ = simulate_batch(physics.COURT_W - self.x0, self.y0, self.v0,
                                   self.angle, -np.ones(32))
         self.assertTrue(np.allclose(lp + lm, physics.COURT_W, atol=1e-6))
+
+    def test_short_flight_obs_rest_at_landing(self):
+        # 快球在 0.15 s 观察窗内落地：落地后的帧必须是落点静止位置，
+        # 不能是 (0,0)（否则归一化后变成「球在左上角」的坏输入）
+        landing, ftime, obs = simulate_batch(
+            np.array([500.0]), np.array([60.0]), np.array([3000.0]),
+            np.array([-0.6]), np.array([1.0]))
+        self.assertLess(float(ftime[0]), 0.15)
+        self.assertAlmostEqual(float(obs[0, 0, 0]), 500.0)      # 第 0 帧 = 击球点
+        for frame in (1, 2, 3):
+            self.assertAlmostEqual(float(obs[0, frame, 0]), float(landing[0]))
+            self.assertAlmostEqual(float(obs[0, frame, 1]), 0.0)
 
 
 if __name__ == "__main__":

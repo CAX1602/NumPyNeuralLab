@@ -1,4 +1,7 @@
-"""生成落点网络的训练数据 shots.npz（11-20）。
+"""生成落点网络的训练数据 shots.npz（11-20；11-24 对齐交付版游戏）。
+
+对齐项：场宽 1200、非线性出球角（physics.launch_angle，与 game.py 同公式）、
+球速 5 档 V_MIN/V_MAX = 1900/4100。
 
 运行：
     .venv\\Scripts\\python.exe make_shots.py
@@ -104,9 +107,12 @@ def main():
 
 
 def plot_drag_comparison():
-    """同一击球，有阻力 vs 真空，证明轨迹明显偏离抛体。"""
-    # 示例：两条轨迹都过网且高于网顶、都落在对方场区内，对照才公平
-    kw = dict(x0=300, y0=220, v0=820, angle=0.9, direction=1)
+    """同一击球，有阻力 vs 真空，证明轨迹明显偏离抛体。
+
+    11-24 示例（5 档球速、1200 场宽）：阻力下落点 828（对方界内），
+    真空下同一条轨迹会飞到 1660 —— 直接飞出底线，阻力「救命」。
+    """
+    kw = dict(x0=300, y0=220, v0=1500, angle=0.5, direction=1)
     _, xd, yd = simulate_path(drag_k=physics.DRAG_K, **kw)
     _, xv, yv = simulate_path(drag_k=0.0, **kw)
     fig, ax = plt.subplots(figsize=(8, 4.5))

@@ -188,5 +188,37 @@ class TestDeterminism(unittest.TestCase):
         self.assertFalse(np.array_equal(a["W1"], b["W1"]))
 
 
+class TestTrainedModelInterface(unittest.TestCase):
+    def test_predict_with_model_matches_manual(self):
+        from landing import predict_with_model
+        rng = np.random.default_rng(11)
+        X = rng.uniform(0, 1, size=(20, 8))
+        p = initialize_parameters(8, 16, seed=3)
+        norm = {"x_mean": rng.uniform(0, 1, 8),
+                "x_std": rng.uniform(0.05, 0.3, 8),
+                "y_mean": 0.5, "y_std": 0.25, "court_w": 1200.0}
+        manual = (forward((X - norm["x_mean"]) / norm["x_std"], p)
+                  * norm["y_std"] + norm["y_mean"]) * norm["court_w"]
+        np.testing.assert_allclose(predict_with_model(X, p, norm), manual)
+
+    def test_load_model_roundtrip(self):
+        import tempfile
+        from pathlib import Path
+        from landing import load_model, predict_with_model
+        p = initialize_parameters(8, 16, seed=5)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.npz"
+            np.savez(path, **p, x_mean=np.zeros(8), x_std=np.ones(8),
+                     y_mean=0.5, y_std=0.25, court_w=1200.0)
+            p2, norm = load_model(path)
+        for name in p:
+            self.assertTrue(np.array_equal(p[name], p2[name]))
+        self.assertEqual(norm["court_w"], 1200.0)
+        X = np.zeros((1, 8))
+        np.testing.assert_allclose(
+            predict_with_model(X, p2, norm),
+            (forward(X, p) * 0.25 + 0.5) * 1200.0)
+
+
 if __name__ == "__main__":
     unittest.main()
