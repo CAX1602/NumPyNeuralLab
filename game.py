@@ -347,6 +347,7 @@ class AIController:
         self.swing_dist = 130     # 球距多远时起挥（弧线缩短后重标：120→2.2、130→17.9、150→1.0）
         self.lead_time = 0.13     # 「多久之后球到我这」的起挥阈值（秒）：改按时间起挥，球速变了也不会晚
         self.stand_off = 25       # 站在落点靠后多少
+        self.refine = True        # 末端 0.35 s 模拟器精修开关；compare_ai.py 纯预测对照时关闭
         nets = _load_nets()
         if nets:
             (self.landing_params, self.landing_norm), \
@@ -447,7 +448,7 @@ class AIController:
             # 截击点误差 ~48 px，不修会拖晚接触、球往后砸（11-24 实测）。
             land_pred, ic_pred = self.predict_pair(ball)
             t_arrive = abs(ball.x - p.x) / (abs(ball.vx) + 1e-6)
-            if t_arrive < 0.35 or ball.y <= IC_HEIGHT:
+            if self.refine and (t_arrive < 0.35 or ball.y <= IC_HEIGHT):
                 ic = self.intercept_x(ball)
                 if ic is not None:
                     ic_pred = ic

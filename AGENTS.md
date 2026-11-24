@@ -16,7 +16,7 @@
 ## 1. 文件边界
 
 - **可改**：`game.py`、`characters.py`、`game_style_preview.py`、`character_select_preview.py`、`docs/` 游戏相关图、`进展记录.md`、桌面交接文件。
-- **不可改**：`network.py`、`physics.py`、`data.py`、`train.py`、`experiment*.py`、`gradients.py`、`tests/`、`make_shots.py`、`shots.npz`、`landing.py`、`landing_baseline.py`、`train_landing.py`、`landing_model.npz`、`decision.py`、`make_decision.py`、`train_decision.py`、`decision_shots.npz`、`decision_model.npz`。需要动物理或网络 → 停下来告诉用户转 Qoder。
+- **不可改**：`network.py`、`physics.py`、`data.py`、`train.py`、`experiment*.py`、`gradients.py`、`tests/`、`make_shots.py`、`shots.npz`、`landing.py`、`landing_baseline.py`、`train_landing.py`、`landing_model.npz`、`decision.py`、`make_decision.py`、`train_decision.py`、`decision_shots.npz`、`decision_model.npz`、`compare_ai.py`。需要动物理或网络 → 停下来告诉用户转 Qoder。
 - **接口契约**：`AIController.predict(self, ball)` 返回落点 x，**11-24 已接落点网络**；跑位实际用 `predict_pair()` 的第二个输出（截击点），末端 0.35 s 模拟器精修。改动 AI 跑位/挥拍时保持这两个接口的语义，别让网络变成摆设。
 
 ## 2. 固定设计规则（用户已定，不许回退）
