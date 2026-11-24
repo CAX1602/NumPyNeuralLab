@@ -13,3 +13,6 @@ Thumbs.db
 
 # 游戏崩溃日志（game.py 出 bug 时写出）
 crash.log
+
+# DSH 视频理解缓存
+.dsh-video-vision/

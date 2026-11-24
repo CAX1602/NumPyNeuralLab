@@ -8,9 +8,9 @@
 输入 = 击球后 0.15 s 的 4 帧观测（obs(n,4,2) 展平成 8 维），输出 = 落点 x。
 坐标统一除以场宽 COURT_W 做归一化（固定常数，不是从数据统计出来的，无泄漏）。
 
-**本模块不训练真实数据**：物理参数未定稿，shots.npz 还会重生成。
-正确性由合成数据保证（见 __main__ 与 tests/test_landing.py）；
-11-27 物理定稿后：make_shots.py 重生成 → load_dataset() → train() → 存 landing_model.npz。
+**训练已完成（11-24）**：train_landing.py 用训练集 z-score 标准化训出
+landing_model.npz（test RMSE 14.58 px），推理走 load_model + predict_with_model。
+本模块的 initialize/train 已泛化出 n_output 参数，决策网络（decision.py）复用。
 """
 
 import numpy as np
@@ -18,14 +18,17 @@ import numpy as np
 from physics import COURT_W
 
 
-def initialize_parameters(n_input=8, hidden_size=16, seed=42):
-    """创建旋钮。8→16→1 时共 8*16+16+16+1 = 161 个参数。"""
+def initialize_parameters(n_input=8, hidden_size=16, seed=42, n_output=1):
+    """创建旋钮。8→16→1 时共 8*16+16+16+1 = 161 个参数。
+
+    n_output 默认 1（落点回归）；决策网络传 3（每个动作一个价值分）。
+    """
     rng = np.random.default_rng(seed)
     return {
         "W1": rng.normal(0, 0.5, size=(n_input, hidden_size)),
         "b1": np.zeros((1, hidden_size)),
-        "W2": rng.normal(0, 0.5, size=(hidden_size, 1)),
-        "b2": np.zeros((1, 1)),
+        "W2": rng.normal(0, 0.5, size=(hidden_size, n_output)),
+        "b2": np.zeros((1, n_output)),
     }
 
 
@@ -58,8 +61,9 @@ def backward(X, y, parameters):
     A1 = np.tanh(Z1)
     A2 = A1 @ parameters["W2"] + parameters["b2"]
 
-    # 0.5·MSE + 线性输出：dZ2 与 sigmoid+BCE 同一形式
-    dZ2 = (A2 - y) / m
+    # 0.5·MSE + 线性输出：dZ2 与 sigmoid+BCE 同一形式。
+    # 损失对全部输出元素取平均 → 除以元素总数（单输出时 A2.size = m，与原来一致）
+    dZ2 = (A2 - y) / A2.size
     dW2 = A1.T @ dZ2
     db2 = np.sum(dZ2, axis=0, keepdims=True)
 
@@ -72,14 +76,15 @@ def backward(X, y, parameters):
 
 
 def train(X, y, hidden_size=16, learning_rate=0.1, epochs=3000,
-          seed=42, print_every=500, X_validation=None, y_validation=None):
+          seed=42, print_every=500, X_validation=None, y_validation=None,
+          n_output=1):
     """全批量梯度下降，接口与 train.py 对齐。返回 (参数, 历史)。
 
     学习率默认 0.1：回归的梯度尺度与分类不同，0.5 会在几百轮内发散（11-19 实测），
     0.1–0.3 在合成数据上稳定；与「lr=10 在 4 点集发散、400 点集收敛」同一课——
-    稳定学习率不能跨设置照搬。
+    稳定学习率不能跨设置照搬。真实训练的学习率与标准化见 train_landing.py。
     """
-    parameters = initialize_parameters(X.shape[1], hidden_size, seed)
+    parameters = initialize_parameters(X.shape[1], hidden_size, seed, n_output)
     history = {"train": [], "validation": []}
 
     for epoch in range(epochs):

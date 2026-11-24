@@ -42,11 +42,11 @@ def sample_shots(n, seed):
         mask = swing == name
         theta[mask] = rng.uniform(lo, hi, size=mask.sum())
     s = rng.uniform(0.0, 1.0, size=n)
-    # 击球点在本方半场；高度覆盖地面到起跳可达
+    # 击球点在本方半场；高度覆盖地面到起跳可达（站立 ≤260，跳杀再加 100~155 → 到 420）
     x0 = np.where(direction > 0,
                   rng.uniform(60, NET_X - 60, size=n),
                   rng.uniform(NET_X + 60, COURT_W - 60, size=n))
-    y0 = rng.uniform(40, 260, size=n)
+    y0 = rng.uniform(40, 420, size=n)
     v0, angle = resolve_hit(theta, s, power)
     return dict(theta=theta, s=s, power=power, direction=direction,
                 swing=swing, x0=x0, y0=y0, v0=v0, angle=angle)
