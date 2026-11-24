@@ -10,6 +10,7 @@ __pycache__/
 # 系统
 .DS_Store
 Thumbs.db
+~$*.docx
 
 # 游戏崩溃日志（game.py 出 bug 时写出）
 crash.log
