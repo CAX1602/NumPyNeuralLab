@@ -20,10 +20,10 @@ import physics
 from characters import CHARACTERS, draw_character, jump_speed, normalize, pros_cons
 from game_style_preview import draw_shuttle, draw_trail
 
-W, H = 1200, 500                   # 11-19 用户：「球场小了」→ 900 加宽到 1200（网在正中 600）
-FLOOR_Y = 460                      # 屏幕 y：地板线
+W, H = 1200, 800                   # 3:2，和用户屏幕（1440×960 逻辑分辨率）同比例；网在正中 600
+FLOOR_Y = H - 100                  # 屏幕 y：地板线（下面留 100 px 地板，底部 38 px 是键位条）
 SCALE = 1.0
-ZOOM = 0.85                        # 整个世界在窗口里的缩放（用户：窗口/人物太大，整体缩小一点）。
+ZOOM = 0.90                        # 整个世界在窗口里的缩放：1200×800 → 1080×720，装在 1440×960 的桌面里刚好
                                    # 世界坐标仍是 W×H（物理与判定都不变），只把画好的整帧缩放贴到窗口。
 ZOOM_MIN, ZOOM_MAX = 0.60, 1.20
 
@@ -62,9 +62,12 @@ NET_X = W // 2                     # 600（球场加宽后网在正中；不再�
 NET_H = physics.NET_HEIGHT         # 150
 WIN_SCORE = 7
 WIN_GAMES = 2                      # 经典模式：三局两胜（先拿下 2 局）
+AI_ATTACK_Y = 225.0                 # AI 起跳杀球的球高度阈值（世界坐标，球还这么高才值得跳）
+AI_ATTACK_DX = 220.0                # 球横向离 AI 多近时可以起跳
+AI_ATTACK_ZONE = 400.0              # 落点在自己半场靠网的前 400 px 内（「杀球机会」）；调大喊它更爱杀
 IC_HEIGHT = 250.0                  # AI 的截击高度（世界坐标）：球降到这个高度时拍子够得着
 SERVICE_LINE = 150.0               # 发球线：距网 150 px。发球必须站在这条线**后面**（用户：要有发球线）
-SPEED_DEFAULT = 5.0                # 标准球速档位（5 档 = V_MIN/V_MAX 1900/4100）；设置界面可改
+SPEED_DEFAULT = 10.0               # 球速固定 10 档（V_MIN/V_MAX 3800/8200）：用户验收后锁定，界面不再暴露
 
 WALL = (168, 178, 174)
 WOOD = (198, 156, 106)
@@ -84,13 +87,13 @@ SERVE_ANGLE = 0.90
 RACKET_LEN = 70 * SCALE                       # 拍长 = 物理接触段（手→拍头）；改它会改手感，别乱动
 DRAW_RACKET_LEN = 104 * SCALE                 # 画出来的拍子比接触段长一点：球看起来打在拍面上（不超出去）
 CONTACT_R = 34                                # 判定带半宽（球离扫过的拍杆多近算碰到）
-WAIST_H = 90 * SCALE                          # 腰部阈值，随跳跃上移
+WAIST_H = 200 * SCALE                         # 挑球判定线高度（离脚 200 px ≈ 胸口；原来 90 = 腰）。随跳跃一起上移
 # 判定带（用户：判定范围扩大成一个带子，球拍从后往前的整个过程都要算进来）：
 # 挥拍时拍杆扫过的是一个面，不是一个时刻的一条线 —— 所以每个子步把
 # 「本次挥拍从 q=0 到当前 q」之间采样 CONTACT_SAMPLES 个拍杆位置，球碰到其中任何一段都算击中。
 # 比「只在当前瞬间那条线段上判定」宽得多，也不会因为按早了就空挥（球在带子里就会被扫到）。
 CONTACT_SAMPLES = 12
-RECOVER_DUR = 0.38                            # 收拍后从收拍姿势平滑回到准备姿势的时长
+RECOVER_DUR = 0.15                            # 收拍后回到准备姿势的过渡时长（用户：挥完别一直晃 → 0.38 缩到 0.15）
                                               # （用户：发完球别往下收，自然往上继续，变成架拍准备打头顶球）
 
 # 准备姿势（用户给的参考图；拍子举过头顶、拍头在身后 = 正确的架拍）：
@@ -152,6 +155,7 @@ class Player:
         self.contacted = False
         self.recover_t = 1e9             # 收拍后的过渡计时（从收拍姿势回到准备姿势）
         self.recover_hand = None
+        self.recover_key = None          # 过渡期间锁定的准备姿势（防止半路改姿势造成「晃」）
         self.recover_theta = 0.0
         # 11-19 球场加宽到 1200 后重标：0.68W 处回合最长（实测 18 次/回合，0.715W 只有 4.7）
         self.recover_x = W * 0.32 if side == "L" else W * 0.68
@@ -245,6 +249,7 @@ class Player:
                 self.swing_t = -1.0
                 # 收完拍别「定格再瞬移」：记下收拍姿势，后面用 RECOVER_DUR 平滑过渡回准备姿势
                 self.recover_t = 0.0
+                self.recover_key = None
                 self.recover_hand = _path_point(HAND_PATH[self.swing_type], 1.0)
                 self.recover_theta = SWING_ARC[self.swing_type][1]
         elif self.recover_hand is not None:
@@ -355,6 +360,13 @@ class AIController:
             want = self.target - p.facing * self.stand_off
             if abs(p.x - want) > 6:
                 move = 1.0 if want > p.x else -1.0
+            # 攻击球：球还在高处往下掉、已经快到我面前 → 起跳，让手高过球，
+            # 拍子从上往下压（这就是模型里能「杀」的唯一方式：接触时拍面朝下）
+            land_x = self.predict(ball)
+            front = (land_x < NET_X + AI_ATTACK_ZONE) if p.side == "R" else (land_x > NET_X - AI_ATTACK_ZONE)
+            if (AI_ATTACK_Y < ball.y and ball.vy < 0 and abs(ball.x - p.x) < AI_ATTACK_DX
+                    and front and p.h <= 0.0 and p.swing_t < 0):
+                jump = True
             near = abs(ball.x - p.x) < self.swing_dist
             height_ok = 50 < ball.y < 250 + p.h
             # 按「还要多久到」起挥，而不是「还有多远」：平快球用距离判会永远慢半拍
@@ -404,7 +416,9 @@ class Game:
         if p is self.human and NET_X - p.x < SERVICE_LINE:   # 站进发球线以内，发球无效
             self.serve_msg = "step behind the service line, then press SPACE"
             return
-        self.ball.launch(p.x + p.facing * 30, 110, SERVE_V0, SERVE_ANGLE, p.facing, self.server)
+        # 力度 = 高远球同角度的力度（v_base 是一条随球速档位缩放的曲线），发球不再是半个力度
+        v0 = max(SERVE_V0, physics.v_base(SERVE_ANGLE))
+        self.ball.launch(p.x + p.facing * 30, 110, v0, SERVE_ANGLE, p.facing, self.server)
         p.start_swing(force="lift")     # 只做发球动作：球已经从腰侧发出去了
         self.serve_msg = ""
         self.rallies += 1
@@ -472,11 +486,8 @@ class Game:
             th, s = hit
             s = min(1.0, max(0.0, s))
             v0, angle = physics.resolve_hit(th, s, p.char["power"])
-            # 出球角 = 拍面角 − 调整量。用户：「不要任何额外辅助，就调这个函数」，
-            # 并且要求「拍面角越向下、出球角压得越尖」→ 低于 LAUNCH_KNEE 的部分按平方追加下压。
-            low = max(0.0, min(1.0, (LAUNCH_KNEE - th) / 0.50))
-            angle -= LAUNCH_TILT + LAUNCH_SHARP * low * low
-            angle = max(angle, -0.61)                 # 最多往下 35°：再低就是往自己脚下砸了
+            # 出球角的下压（常数 + 低拍角平方追加）已经由 physics.launch_angle() 算好了，
+            # 这里**绝对不能再减一次** —— 11-24 两边同时减导致所有球变成 -7° 直钻网子。
             b.launch(b.x, b.y, float(v0), float(angle), p.facing, p.side)
             p.contacted = True
             self.hits += 1
@@ -584,20 +595,32 @@ class Game:
             hand, th = p.hand_offset(), p.draw_theta()
             free_hand = None
         else:
-            key = self.ready_key(p)
+            # 收拍后的目标姿势在这一段过渡里锁死（不再每帧重算），否则球一过腰就会
+            # 在半路改成低姿势、看着像手臂在「晃」
+            if p.recover_key is None or p.recover_t >= RECOVER_DUR:
+                p.recover_key = self.ready_key(p)
+            key = p.recover_key
             hand, th = HAND_READY[key], THETA_READY[key]
             free_hand = FREE_READY[key]
-            # 收拍过渡：从刚收拍的姿势平滑走回准备姿势（发球后拍子自然举起来变成架拍）
+            # 收拍过渡：从刚收拍的姿势快速走回准备姿势（时间短，避免挥完还在动）
             if p.recover_hand is not None and p.recover_t < RECOVER_DUR:
                 k = p.recover_t / RECOVER_DUR
                 k = k * k * (3.0 - 2.0 * k)
                 hand = (p.recover_hand[0] + (hand[0] - p.recover_hand[0]) * k,
                         p.recover_hand[1] + (hand[1] - p.recover_hand[1]) * k)
                 th = p.recover_theta + (th - p.recover_theta) * k
+        # 拍子不许穿地板：角度朝下时按手上的高度把拍长收短（像临场收腕），最低留 60 px
+        hand_y = p.feet_y + hand[1]
+        sin_th = math.sin(th)
+        rl = DRAW_RACKET_LEN
+        if sin_th < -1e-3:
+            # 画出来的拍框最远端 = 1.043 × racket_len（柄 26 + 中轴 24 + 半径 23，按 70 归一）
+            room = (FLOOR_Y - 8 - hand_y) / ((-sin_th) * (73.0 / 70.0) * SCALE)
+            rl = max(60.0, min(rl, room))
         draw_character(s, p.char, int(p.x), int(p.feet_y),
                        "right" if p.facing > 0 else "left", SCALE,
                        racket_theta=th, hand=hand, free_hand=free_hand,
-                       racket_len=DRAW_RACKET_LEN)
+                       racket_len=rl)
         if swinging:                                    # 白色残影：拍头最近扫过的轨迹
             q1 = p.swing_q()
             q0 = max(0.0, q1 - 0.30)
@@ -626,7 +649,7 @@ class Game:
             k = 760.0 / mark.get_width()
             mark = pygame.transform.smoothscale(mark, (760, int(mark.get_height() * k)))
         mark.set_alpha(110)
-        s.blit(mark, mark.get_rect(center=(W // 2, 300)))
+        s.blit(mark, mark.get_rect(center=(W // 2, H // 2 - 40)))
         self.draw_player(s, self.human)
         self.draw_player(s, self.ai_p)
         # 只有球在飞、或已经落地（y<=0）时才画；发球前那个停在半空的初始球不画（用户：「幽灵球」）
@@ -728,8 +751,6 @@ def select_screen(win, world, fonts):
                     return CHARACTERS[sel], modes[mi][0], spd
                 if e.key in (pygame.K_m, pygame.K_TAB):
                     mi = (mi + 1) % len(modes)
-                if e.key == pygame.K_s:                       # 球速档位 2~5
-                    spd = spd + 1.0 if spd < 5.0 else 2.0
                 if e.key in (pygame.K_MINUS, pygame.K_KP_MINUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
                     step = 0.05 if e.key in (pygame.K_EQUALS, pygame.K_KP_PLUS) else -0.05
                     ZOOM = max(ZOOM_MIN, min(ZOOM_MAX, ZOOM + step))
@@ -746,17 +767,16 @@ def select_screen(win, world, fonts):
         screen.blit(fonts["mid"].render("CHOOSE YOUR CHARACTER", True, (236, 238, 232)), (24, 16))
         # 顶部四个设置框：模式 ×2、球速档位、窗口大小
         boxes = [(f"{label}", sub, k == mi) for k, (_mid, label, sub) in enumerate(modes)]
-        boxes.append((f"SPEED {spd:.0f}x", "press S", True))
         boxes.append((f"WINDOW {int(round(ZOOM * 100))}%", "press - / =", True))
         for k, (label, sub, on) in enumerate(boxes):
-            r = pygame.Rect(330 + k * 172, 8, 164, 44)
+            r = pygame.Rect(330 + k * 200, 54, 190, 44)
             pygame.draw.rect(screen, (58, 62, 54) if on else (38, 40, 46), r)
             pygame.draw.rect(screen, (242, 202, 72) if on else (92, 94, 100), r, 3 if on else 1)
             lb = fonts["mid"].render(label, True, (244, 226, 150) if on else (168, 172, 168))
             screen.blit(lb, lb.get_rect(center=(r.centerx, r.centery - 7)))
             sb = fonts["small"].render(sub, True, (168, 172, 168) if on else (120, 124, 122))
             screen.blit(sb, sb.get_rect(center=(r.centerx, r.centery + 12)))
-        gx, gy, cw, ch, gap = 330, 58, 182, 96, 6
+        gx, gy, cw, ch, gap = 330, 120, 200, 112, 8
         for i, c in enumerate(CHARACTERS):
             col, row = i % 3, i // 3
             r = pygame.Rect(gx + col * (cw + gap), gy + row * (ch + gap), cw, ch)
@@ -767,17 +787,17 @@ def select_screen(win, world, fonts):
             lab = fonts["small"].render(c["name"], True, (236, 238, 232))
             screen.blit(lab, lab.get_rect(center=(r.centerx, r.bottom - 10)))
         c = CHARACTERS[sel]
-        draw_character(screen, c, 150, 330, "right", 1.15)
+        draw_character(screen, c, 150, 600, "right", 1.15)
         n = fonts["mid"].render(c["name"], True, (236, 238, 232))
-        screen.blit(n, n.get_rect(center=(150, 344)))
+        screen.blit(n, n.get_rect(center=(150, 636)))
         good, bad = pros_cons(c)
         t = fonts["small"].render(f"{good} / {bad}", True, (156, 162, 158))
-        screen.blit(t, t.get_rect(center=(150, 366)))
+        screen.blit(t, t.get_rect(center=(150, 660)))
         nm = normalize(c)
         for j, (key, val) in enumerate([("SPEED", str(c["speed"])),
                                         ("POWER", f"{c['power']:.2f}"),
                                         ("JUMP", str(c["jump"]))]):
-            y = 384 + j * 22
+            y = 682 + j * 22
             screen.blit(fonts["small"].render(key, True, (156, 162, 158)), (40, y))
             filled = 1 + round(nm[key.lower()] * 7)
             for i in range(8):
@@ -787,7 +807,7 @@ def select_screen(win, world, fonts):
         pygame.draw.rect(screen, (22, 22, 26), (0, H - 38, W, 38))
         pygame.draw.line(screen, (58, 60, 66), (0, H - 38), (W, H - 38), 1)
         draw_hints(screen, fonts.get("hint") or fonts["small"],
-                   [("←/→", "select"), ("M", "mode"), ("S", "speed"),
+                   [("←/→", "select"), ("M", "mode"),
                     ("- / =", "window"), ("ENTER", "start"), ("ESC", "quit")],
                    gx, H - 38 + 9)
         present(win, world)
@@ -818,13 +838,13 @@ def start_screen(win, world, fonts):
                            racket_theta=THETA_READY["hi"], hand=HAND_READY["hi"],
                            free_hand=FREE_READY["hi"], racket_len=DRAW_RACKET_LEN)
         title = fonts["title"].render("NEURAL BADMINTON", True, (242, 202, 72))
-        world.blit(title, title.get_rect(center=(W // 2, 88)))
+        world.blit(title, title.get_rect(center=(W // 2, 150)))
         sub = fonts["small"].render("physics simulated in NumPy   ·   neural landing predictor", True, (150, 156, 152))
-        world.blit(sub, sub.get_rect(center=(W // 2, 140)))
+        world.blit(sub, sub.get_rect(center=(W // 2, 202)))
         a = 0.55 + 0.45 * abs(math.sin(t * 2.0))
         pr = fonts["mid"].render("press any key or click to start", True,
                                  (int(236 * a), int(238 * a), int(232 * a)))
-        world.blit(pr, pr.get_rect(center=(W // 2, H - 92)))
+        world.blit(pr, pr.get_rect(center=(W // 2, H - 78)))
         present(win, world)
         clock.tick(60)
 
