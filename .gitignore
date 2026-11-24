@@ -13,6 +13,11 @@ Thumbs.db
 
 # 游戏崩溃日志（game.py 出 bug 时写出）
 crash.log
+defense_log.csv
 
 # DSH 视频理解缓存
 .dsh-video-vision/
+
+# AI 调试日志（每次开一局重写）
+ai_log.txt
+

@@ -17,7 +17,7 @@
 
 - **可改**：`game.py`、`characters.py`、`game_style_preview.py`、`character_select_preview.py`、`docs/` 游戏相关图、`进展记录.md`、桌面交接文件。
 - **不可改**：`network.py`、`physics.py`、`data.py`、`train.py`、`experiment*.py`、`gradients.py`、`tests/`、`make_shots.py`、`shots.npz`、`landing.py`、`landing_baseline.py`、`train_landing.py`、`landing_model.npz`、`decision.py`、`make_decision.py`、`train_decision.py`、`decision_shots.npz`、`decision_model.npz`。需要动物理或网络 → 停下来告诉用户转 Qoder。
-- **接口契约**：`game.py:156` `AIController.predict(self, ball)` 保持签名与语义（返回落点 x）。现在内部是模拟器占位；**11-28 由 Qoder 换成落点网络**，不要重构掉这个接口。
+- **接口契约**：`AIController.predict(self, ball)` 返回落点 x，**11-24 已接落点网络**；跑位实际用 `predict_pair()` 的第二个输出（截击点），末端 0.35 s 模拟器精修。改动 AI 跑位/挥拍时保持这两个接口的语义，别让网络变成摆设。
 
 ## 2. 固定设计规则（用户已定，不许回退）
 
@@ -33,8 +33,8 @@
 ## 3. 运行与验证（本机实测过的命令）
 
 - 一律用项目 venv：`.venv/Scripts/python.exe`。**全局 D:\Python 没有 pygame**，用错解释器会 ModuleNotFoundError。
-- 测试：`.venv/Scripts/python.exe -m unittest discover -s tests`（77 例，应全绿；含落点网络、线性基线、决策网络）。
-- **落点网络已训练（11-24 晚，10 档/1.5 阻力版）**：`landing_model.npz` test RMSE 15.44 px。游戏侧若要提前接 `predict()`，用 `landing.load_model()` + `predict_with_model(X, params, norm)`（X = 4 帧观测 ÷1200 展平），不要自己手写前向。
+- 测试：`.venv/Scripts/python.exe -m unittest discover -s tests`（78 例，应全绿；含落点网络、线性基线、决策网络）。
+- **落点网络已训练并接入（11-24 晚，10 档/1.5 阻力版，双输出）**：`landing_model.npz` test 落点 14.60 px / 截击点 48.39 px。游戏内走 `predict_pair()`；改物理后必须重跑 make_shots.py → train_landing.py 再同步游戏。
 - **决策网络已训练（11-24 晚）**：`decision_model.npz` 跳杀/高远二分类 test 一致率 99.6%。游戏入口 `decision.decide(state, params, norm)`，state = [接触点x, 接触点y, 剩余时间t_in, 人类站位x]（AI 在右半场时先把所有 x 镜像成 1200−x）；返回 0 挑 / 1 高远 / 2 跳杀。低球与来不及跳的情况函数内部已按规则处理。
 - 自动对打：`.venv/Scripts/python.exe game.py --smoke`（30 s，看 fps 与 hits/rally；基线 60.4 fps、9 次/回合）。
 - 画面改动：pygame 可无窗口渲染 `Surface` 存 png 到 `docs/`，然后 Read 目检（挥拍动画就是这么验的）。

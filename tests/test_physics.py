@@ -102,6 +102,17 @@ class TestSimulateBatch(unittest.TestCase):
         b, _, _ = simulate_batch(self.x0, self.y0, self.v0, self.angle, self.dir)
         self.assertTrue(np.array_equal(a, b))
 
+    def test_intercept_target(self):
+        # 高球：截击点在击球点与落点之间（向右打）；平球（没高过 250）：截击点 = 落点
+        landing, _, _, ic = simulate_batch(
+            np.array([300.0, 300.0]), np.array([200.0, 100.0]),
+            np.array([2000.0, 1200.0]), np.array([0.6, 0.1]),
+            np.array([1.0, 1.0]), with_intercept=True)
+        self.assertEqual(ic.shape, (2,))
+        self.assertGreater(ic[0], 300.0)
+        self.assertLess(ic[0], landing[0] + 1e-6)
+        self.assertAlmostEqual(float(ic[1]), float(landing[1]), places=6)
+
     def test_direction_mirrors(self):
         lp, _, _ = simulate_batch(self.x0, self.y0, self.v0, self.angle,
                                   np.ones(32))

@@ -120,17 +120,18 @@ def predict_jump_proba(X, parameters, norm):
     return classify_forward((X - norm["x_mean"]) / norm["x_std"], parameters)
 
 
-def decide(state, parameters, norm):
+def decide(state, parameters, norm, jump_threshold=0.5):
     """游戏策略入口：原始状态 state(n,4) → 动作序号（0 挑 / 1 高远 / 2 跳杀）。
 
     低球按游戏规则直接挑；高球且来得及起跳时按网络概率选跳杀/高远。
+    jump_threshold 调低（如 0.4）= AI 更敢杀，调高 = 更保守。
     """
     state = np.asarray(state, dtype=float)
     proba = predict_jump_proba(normalize_state(state), parameters, norm).ravel()
     mask = feasible_mask(state)
     actions = np.zeros(state.shape[0], dtype=int)      # 默认挑球（低球）
     actions[mask[:, 1]] = 1                            # 高球先按高远
-    actions[mask[:, 2] & (proba > 0.5)] = 2            # 来得及且网络说跳 → 跳杀
+    actions[mask[:, 2] & (proba > jump_threshold)] = 2  # 来得及且网络说跳 → 跳杀
     return actions
 
 

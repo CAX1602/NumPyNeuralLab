@@ -114,11 +114,18 @@ def flatten_obs(obs):
     return (obs.reshape(obs.shape[0], -1) / COURT_W).astype(float)
 
 
-def load_dataset(path="shots.npz"):
-    """读 shots.npz → (X(n,8), y(n,1))，全部归一化到场宽单位。只读，不训练。"""
+def load_dataset(path="shots.npz", with_ic=False):
+    """读 shots.npz → (X(n,8), y(n,1))，全部归一化到场宽单位。只读，不训练。
+
+    with_ic=True 时 y 为 (n,2)：[落点 x, 截击点 x]（下行穿过 250 高度的 x），
+    供双输出模型训练——AI 跑位用截击点，不是落点。
+    """
     d = np.load(path)
     X = flatten_obs(d["obs"])
-    y = (d["landing_x"].reshape(-1, 1) / COURT_W).astype(float)
+    if with_ic:
+        y = (np.stack([d["landing_x"], d["ic_x"]], axis=1) / COURT_W).astype(float)
+    else:
+        y = (d["landing_x"].reshape(-1, 1) / COURT_W).astype(float)
     return X, y
 
 
@@ -140,7 +147,7 @@ def load_model(path="landing_model.npz"):
     d = np.load(path)
     parameters = {k: d[k] for k in ("W1", "b1", "W2", "b2")}
     norm = {"x_mean": d["x_mean"], "x_std": d["x_std"],
-            "y_mean": float(d["y_mean"]), "y_std": float(d["y_std"]),
+            "y_mean": d["y_mean"], "y_std": d["y_std"],   # 标量或逐输出向量（双输出）
             "court_w": float(d["court_w"])}
     return parameters, norm
 

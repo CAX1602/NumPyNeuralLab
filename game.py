@@ -15,8 +15,11 @@ import argparse
 import math
 
 import pygame
+import numpy as np
 
 import physics
+import landing
+import decision
 from characters import CHARACTERS, draw_character, jump_speed, normalize, pros_cons
 from game_style_preview import draw_shuttle, draw_trail
 
@@ -62,9 +65,11 @@ NET_X = W // 2                     # 600（球场加宽后网在正中；不再�
 NET_H = physics.NET_HEIGHT         # 150
 WIN_SCORE = 7
 WIN_GAMES = 2                      # 经典模式：三局两胜（先拿下 2 局）
-AI_ATTACK_Y = 225.0                 # AI 起跳杀球的球高度阈值（世界坐标，球还这么高才值得跳）
-AI_ATTACK_DX = 220.0                # 球横向离 AI 多近时可以起跳
-AI_ATTACK_ZONE = 400.0              # 落点在自己半场靠网的前 400 px 内（「杀球机会」）；调大喊它更爱杀
+AI_ATTACK_Y = 170.0                 # AI 起跳杀球的球高度阈值（世界坐标；11-24 用户嫌弱 225→170，机会窗放宽）
+AI_SMASH_RANGE = 160.0              # 只有离网 160 px 以内才考虑跳杀（再远往下压必落自己半场）
+AI_ATTACK_DX = 320.0                # 球横向离 AI 多近时可以起跳（11-24 220→320）
+AI_JUMP_PROBA = 0.40                # 决策网络跳杀概率阈值：低于 0.5 = 更敢杀（用户「有点弱」）
+AI_ATTACK_ZONE = 400.0              # （11-24 起跳杀改由决策网络判断，此常数退役）
 IC_HEIGHT = 250.0                  # AI 的截击高度（世界坐标）：球降到这个高度时拍子够得着
 SERVICE_LINE = 150.0               # 发球线：距网 150 px。发球必须站在这条线**后面**（用户：要有发球线）
 SPEED_DEFAULT = 10.0               # 球速固定 10 档（V_MIN/V_MAX 3800/8200）：用户验收后锁定，界面不再暴露
@@ -263,6 +268,9 @@ class Ball:
         self.live = False                # 是否在被击出后的飞行中
         self.last_hitter = "L"
         self.trail = []
+        self.obs = []                    # 落点网络输入：击球后 0/0.05/0.10/0.15 s 的 4 帧 (x,y)
+        self.obs_t = 0.0
+        self.obs_next = 0.05
 
     @property
     def y_screen(self):
@@ -275,6 +283,19 @@ class Ball:
         self.live = True
         self.last_hitter = hitter
         self.trail = []
+        self.obs = [(x, y)]              # 第 0 帧 = 击球点，与训练数据一致
+        self.obs_t = 0.0
+        self.obs_next = 0.05
+
+    def obs_frames(self):
+        """落点网络的 4 帧输入 (4,2)。没凑齐且球还在飞 → None（调用方走兜底）。
+        球在 0.15 s 内提前落地时，缺的帧按训练约定补成落点静止位置 (x, 0)。"""
+        if len(self.obs) >= 4:
+            return np.array(self.obs[:4])
+        if not self.live and self.obs:
+            frames = self.obs + [(self.x, 0.0)] * (4 - len(self.obs))
+            return np.array(frames[:4])
+        return None
 
     def step(self, dt):
         if not self.live:
@@ -291,24 +312,91 @@ class Ball:
         if (px - NET_X) * (self.x - NET_X) < 0 and self.y < NET_H:
             self.x = NET_X - 2 if self.last_hitter == "L" else NET_X + 2
             self.vx = 0.0
+        # 观测帧采样：0.05 / 0.10 / 0.15 s（240 Hz 子步内计时，误差 ≤1 子步）
+        self.obs_t += dt
+        while len(self.obs) < 4 and self.obs_t + 1e-9 >= self.obs_next:
+            self.obs.append((self.x, self.y))
+            self.obs_next += 0.05
+
+
+_NET_CACHE = None
+
+def _load_nets():
+    """双网络只加载一次（两个 AIController 共用）。文件缺失返回 False，走兜底。"""
+    global _NET_CACHE
+    if _NET_CACHE is None:
+        try:
+            _NET_CACHE = (landing.load_model(), decision.load_model())
+        except OSError:
+            _NET_CACHE = False
+    return _NET_CACHE
 
 
 class AIController:
-    """RECOVER → WAIT → CHASE → SWING。落点暂用模拟器占位（11-28 换网络）。"""
+    """RECOVER → WAIT → CHASE → SWING。
 
-    def __init__(self, player):
+    11-24 接入双网络：落点 = landing 网络（4 帧观测齐了就用，没齐用模拟器兜底）；
+    起跳杀球 = decision 网络（decide() 说跳才跳）。
+    """
+
+    def __init__(self, player, opponent=None):
         self.p = player
+        self.opponent = opponent       # 决策网络要看对方站位
         self.state = "RECOVER"
         self.target = player.recover_x
         self.swing_dist = 130     # 球距多远时起挥（弧线缩短后重标：120→2.2、130→17.9、150→1.0）
         self.lead_time = 0.13     # 「多久之后球到我这」的起挥阈值（秒）：改按时间起挥，球速变了也不会晚
         self.stand_off = 25       # 站在落点靠后多少
+        nets = _load_nets()
+        if nets:
+            (self.landing_params, self.landing_norm), \
+                (self.decision_params, self.decision_norm) = nets
+        else:
+            self.landing_params = self.decision_params = None
+        self.net_used = 0         # 统计：网络预测次数 / 兜底次数 / 建议跳杀次数
+        self.oracle_used = 0
+        self.jump_advised = 0
 
-    def predict(self, ball):
+    def predict_pair(self, ball):
+        """返回 (落点x, 截击点x)。4 帧齐了走双输出网络，否则模拟器兜底。
+
+        AI 跑位用**截击点**（球降到拍子高度时的 x），不是落点：
+        只按落点站会等到球快贴地才挥拍，接触被拖到挥拍弧末段、球往后砸。
+        """
+        frames = ball.obs_frames()
+        if frames is not None and self.landing_params is not None:
+            self.net_used += 1
+            X = landing.flatten_obs(frames[None, ...])
+            out = landing.predict_with_model(
+                X, self.landing_params, self.landing_norm)[0]
+            return float(out[0]), float(out[1])
+        # 前 0.15 s 观测没凑齐：模拟器兜底（与旧版相同）
+        self.oracle_used += 1
         land, _, _ = physics.simulate_batch(
             [ball.x], [ball.y], [math.hypot(ball.vx, ball.vy)],
             [math.atan2(ball.vy, abs(ball.vx))], [1 if ball.vx > 0 else -1])
-        return float(land[0])
+        ic = self.intercept_x(ball)
+        return float(land[0]), (ic if ic is not None else float(land[0]))
+
+    def predict(self, ball):
+        """接口契约：返回落点 x。跑位用的截击点见 predict_pair。"""
+        return self.predict_pair(ball)[0]
+
+    def decide_action(self, ball):
+        """回球决策：0 挑 / 1 高远 / 2 跳杀。决策网络只学了左半场，右半场镜像输入。"""
+        if self.decision_params is None or self.opponent is None:
+            return 1
+        p = self.p
+        mirror = p.side == "R"
+        # 接触点要用**跑位目标**（截击点预测），不是当前站位：
+        # AI 还在往回跑时当前位置偏深，教练会误判「这球杀不了」（11-24 实测 R 全程 0 跳）
+        base_x = self.target if self.state == "CHASE" else p.x
+        contact_x = W - base_x if mirror else base_x
+        opp_x = W - self.opponent.x if mirror else self.opponent.x
+        t_in = min(1.5, max(0.05, abs(ball.x - p.x) / (abs(ball.vx) + 1e-6)))
+        state = np.array([[contact_x, ball.y, t_in, opp_x]])
+        return int(decision.decide(state, self.decision_params, self.decision_norm,
+                                   jump_threshold=AI_JUMP_PROBA)[0])
 
     def intercept_x(self, ball, height=IC_HEIGHT):
         """球飞到「球拍够得着的高度」时的 x。
@@ -327,10 +415,12 @@ class AIController:
         d = 1 if ball.vx > 0 else -1
         _, xs, ys = physics.simulate_path(ball.x, ball.y, v0, ang, d)
         for h in (height, 190.0, 140.0, 100.0):
+            if ys[0] <= h:          # 球已经低于这一档：不是「即将穿过」而是「已经穿过」，换低一档
+                continue
             for x, y in zip(xs, ys):
                 if y <= h:
                     return float(x)
-        return None
+        return float(xs[-1])        # 已经贴地了：直接往落点跑
 
     def update(self, dt, ball, serve_pending):
         p = self.p
@@ -352,27 +442,36 @@ class AIController:
         elif self.state == "WAIT":
             pass
         elif self.state == "CHASE":
-            # 每帧重算目标：平快球按落点站会够不着，优先站到「球降到拍子高度」的那个 x；
-            # 球已经低于截击高度（快贴地了）就退回按落点站。
-            ic = self.intercept_x(ball)
-            self.target = ic if ic is not None else self.predict(ball)
+            # 双输出网络负责**预判跑位**（落点 + 截击点，每帧重算）；
+            # 球到面前的最后 0.35 s（或已低于截击高度）用模拟器精修截击点——
+            # 截击点误差 ~48 px，不修会拖晚接触、球往后砸（11-24 实测）。
+            land_pred, ic_pred = self.predict_pair(ball)
+            t_arrive = abs(ball.x - p.x) / (abs(ball.vx) + 1e-6)
+            if t_arrive < 0.35 or ball.y <= IC_HEIGHT:
+                ic = self.intercept_x(ball)
+                if ic is not None:
+                    ic_pred = ic
+            self.target = ic_pred
             # 站在目标稍靠后一点，让球在身前接触
             want = self.target - p.facing * self.stand_off
             if abs(p.x - want) > 6:
                 move = 1.0 if want > p.x else -1.0
-            # 攻击球：球还在高处往下掉、已经快到我面前 → 起跳，让手高过球，
-            # 拍子从上往下压（这就是模型里能「杀」的唯一方式：接触时拍面朝下）
-            land_x = self.predict(ball)
-            front = (land_x < NET_X + AI_ATTACK_ZONE) if p.side == "R" else (land_x > NET_X - AI_ATTACK_ZONE)
+            # 攻击球：球还在高处往下掉、已经快到我面前 → 由**决策网络**判断值不值得
+            # 起跳杀球（杀球 = 跳起来版高远：手高过球、拍子从上往下压）
             if (AI_ATTACK_Y < ball.y and ball.vy < 0 and abs(ball.x - p.x) < AI_ATTACK_DX
-                    and front and p.h <= 0.0 and p.swing_t < 0):
-                jump = True
+                    and p.h <= 0.0 and p.swing_t < 0):
+                if self.decide_action(ball) == 2:
+                    jump = True
+                    self.jump_advised += 1
             near = abs(ball.x - p.x) < self.swing_dist
             height_ok = 50 < ball.y < 250 + p.h
             # 按「还要多久到」起挥，而不是「还有多远」：平快球用距离判会永远慢半拍
             t_arrive = abs(ball.x - p.x) / (abs(ball.vx) + 1e-6)
             if (near or t_arrive < self.lead_time) and height_ok and ball.vy < 150:
-                p.start_swing(ball)
+                # 防守：来球在往下砸、又已经掉到胸口以下 → 别用高远弧（那样碰球时拍子已过水平线，
+                # 出球朝下会砸回自己半场），改用挑球弧把球兜起来。
+                defend = ball.vy < -400.0 and ball.y < 240.0
+                p.start_swing(ball, force="lift" if defend else None)
                 self.state = "SWING"
         elif self.state == "SWING":
             if p.swing_t < 0:
@@ -386,7 +485,7 @@ class Game:
     def __init__(self, p_char, a_char, smoke=False, race=True, classic=False, speed=None):
         self.human = Player(p_char, "L")
         self.ai_p = Player(a_char, "R")
-        self.ai = AIController(self.ai_p)
+        self.ai = AIController(self.ai_p, opponent=self.human)
         self.ball = Ball()
         self.score = [0, 0]
         self.games = [0, 0]              # 经典模式：已拿下的局数
@@ -400,6 +499,12 @@ class Game:
         self.serve_timer = 1.0
         self.paused = False
         self.debug = False              # 默认关（正式画面干净）；F1 打开看输入/判定状态
+        self.debug_ai = False           # F2：AI 状态/跑位目标/来球高度（排查 AI 用）
+        self._ai_hist = []              # 最近 30 帧 AI 状态，得分时写 ai_log.txt
+        try:
+            open("ai_log.txt", "w", encoding="utf-8").close()   # 每局开始清空，日志只留这一局
+        except OSError:
+            pass
         self.last_key = ""
         self.keys_now = {}              # 本帧轮询到的按键状态（HUD 显示用）
         self.space_prev = False         # 空格上升沿触发（按住只挥一次）
@@ -423,7 +528,20 @@ class Game:
         self.serve_msg = ""
         self.rallies += 1
 
+    def _log_point(self, winner):
+        """每次得分把最近 0.5 s 的 AI 状态写到 ai_log.txt（排查 AI 不接球用）。"""
+        try:
+            ai = self.ai_p
+            with open("ai_log.txt", "a", encoding="utf-8") as f:
+                f.write(f"--- point {winner}  score {self.score[0]}-{self.score[1]} "
+                        f"ai_x={ai.x:.0f} state={self.ai.state}\n")
+                for row in self._ai_hist[-30:]:
+                    f.write(row + "\n")
+        except Exception:
+            pass
+
     def point(self, winner, out_by=None):
+        self._log_point(winner)
         if out_by is not None:                           # 谁把球打出了界，当场在屏幕中间说一声
             self.banner = "OUT!"
             self.banner_sub = "YOU hit it out" if out_by == "L" else "AI hit it out"
@@ -493,6 +611,12 @@ class Game:
             self.hits += 1
 
     def update(self, dt, keys):
+        if self.ball.live:
+            a = self.ai_p
+            self._ai_hist.append(f"ai {self.ai.state:7s} x={a.x:6.1f} tgt={getattr(self.ai, 'target', -1):6.1f} "
+                                 f"ball=({self.ball.x:6.1f},{self.ball.y:6.1f}) v=({self.ball.vx:+.0f},{self.ball.vy:+.0f})")
+            if len(self._ai_hist) > 30:
+                self._ai_hist.pop(0)
         if self.paused or self.over:
             return
         if self.banner_t > 0:
@@ -514,7 +638,7 @@ class Game:
         if self.smoke:
             ai_l = getattr(self, "ai_left", None)
             if ai_l is None:
-                self.ai_left = AIController(self.human)
+                self.ai_left = AIController(self.human, opponent=self.ai_p)
             move, jump = self.ai_left.update(dt, self.ball, not self.ball.live)
         self.human.update(dt, move, jump)
         amove, ajump = self.ai.update(dt, self.ball, not self.ball.live)
@@ -649,7 +773,7 @@ class Game:
             k = 760.0 / mark.get_width()
             mark = pygame.transform.smoothscale(mark, (760, int(mark.get_height() * k)))
         mark.set_alpha(110)
-        s.blit(mark, mark.get_rect(center=(W // 2, H // 2 - 40)))
+        s.blit(mark, mark.get_rect(center=(W // 2, H // 2 - 130)))
         self.draw_player(s, self.human)
         self.draw_player(s, self.ai_p)
         # 只有球在飞、或已经落地（y<=0）时才画；发球前那个停在半空的初始球不画（用户：「幽灵球」）
@@ -669,7 +793,7 @@ class Game:
         pygame.draw.line(s, (58, 60, 66), (0, H - 38), (W, H - 38), 1)
         hf = fonts.get("hint") or fonts["small"]
         draw_hints(s, hf, [("←/→  A/D", "move"), ("↑  W", "jump"), ("SPACE", "swing / serve"),
-                           ("P", "pause"), ("F1", "debug"), ("ESC", "quit")],
+                           ("P", "pause"), ("F1", "stats"), ("F2", "AI state"), ("ESC", "quit")],
                    14, H - 38 + 9)
         if not self.race:
             txt, col = "ENDLESS - no target score", (250, 226, 150)
@@ -717,6 +841,24 @@ class Game:
                                           int(246 * a + 40 * (1 - a)),
                                           int(240 * a + 40 * (1 - a))))
                 s.blit(t1, t1.get_rect(center=(W // 2, cy + 34)))
+        if self.debug_ai:                               # F2：AI 在想什么
+            ai = self.ai_p
+            ic = None
+            if self.ball.live:
+                try:
+                    ic = self.ai.intercept_x(self.ball)
+                except Exception:
+                    ic = None
+            lines = [
+                f"AI {self.ai.state:7s} x={ai.x:6.1f} h={ai.h:5.1f} swing={ai.swing_t:+.2f}",
+                f"target={getattr(self.ai, 'target', -1):6.1f} intercept={('—' if ic is None else f'{ic:6.1f}')}",
+                f"ball live={self.ball.live} x={self.ball.x:6.1f} y={self.ball.y:6.1f} vy={self.ball.vy:+7.1f}",
+                f"last_hitter={self.ball.last_hitter} lead={self.ai.lead_time:.2f}",
+            ]
+            for i, ln in enumerate(lines):
+                t = fonts["small"].render(ln, True, (250, 220, 140))
+                s.blit(t, (W - t.get_width() - 12, 84 + i * 18))
+
         if self.debug:                                  # 默认关：排查输入/判定用（F1 打开）
             hp = self.human
             lines = [
@@ -854,6 +996,8 @@ def main():
     ap.add_argument("--smoke", action="store_true", help="双 AI 自动对打 30 s 后退出")
     ap.add_argument("--practice", action="store_true", help="练习模式（不限分一直打；默认是 7 分制）")
     ap.add_argument("--race", action="store_true", help=argparse.SUPPRESS)   # 旧参数，保留兼容
+    ap.add_argument("--log", action="store_true",
+                    help="每帧写 telemetry 到 defense_log.csv（排查 AI 防守/杀球用）")
     args = ap.parse_args()
 
     pygame.init()
@@ -887,6 +1031,10 @@ def main():
         print(f"smoke | frames {frames} | {secs:.1f}s | avg_fps {frames / secs:.1f} "
               f"| min_fps {fps_min:.1f} | score {game.score[0]}-{game.score[1]} "
               f"| rallies {game.rallies} | hits {game.hits}")
+        for tag, ctrl in (("R", game.ai), ("L", getattr(game, "ai_left", None))):
+            if ctrl is not None:
+                print(f"smoke AI-{tag} | landing net {ctrl.net_used} / oracle {ctrl.oracle_used} "
+                      f"| jump advised {ctrl.jump_advised}")
         pygame.quit()
         return
 
@@ -904,6 +1052,14 @@ def main():
         idx = CHARACTERS.index(p_char)
         game = Game(p_char, CHARACTERS[(idx + 6) % 12],
                     race=(mode != "endless"), classic=(mode == "classic"), speed=spd)
+        logger = None
+        if args.log:                                # 防守排查：每帧一行，Esc 退出后给 Qoder 分析
+            import atexit
+            logger = open("defense_log.csv", "w", encoding="utf-8")
+            logger.write("t,bx,by,bvx,bvy,live,hitter,hx,ax,ai_state,ai_target,ai_swing,ai_h\n")
+            atexit.register(logger.close)
+            print("telemetry → defense_log.csv")
+        log_t = 0.0
         keys = {}
         while True:
             for e in pygame.event.get():
@@ -918,6 +1074,8 @@ def main():
                         game.paused = not game.paused
                     if e.key == pygame.K_F1:
                         game.debug = not game.debug
+                    if e.key == pygame.K_F2:
+                        game.debug_ai = not game.debug_ai
                     game.last_key = pygame.key.name(e.key)
                     if e.key == pygame.K_RETURN and game.over:
                         break
@@ -935,6 +1093,13 @@ def main():
                 game.keys_now = keys
                 try:
                     game.update(1 / 60, keys)
+                    if logger is not None:
+                        b, a = game.ball, game.ai
+                        log_t += 1 / 60
+                        logger.write(
+                            f"{log_t:.3f},{b.x:.1f},{b.y:.1f},{b.vx:.1f},{b.vy:.1f},"
+                            f"{int(b.live)},{b.last_hitter},{game.human.x:.1f},{game.ai_p.x:.1f},"
+                            f"{a.state},{a.target:.1f},{game.ai_p.swing_t:.3f},{game.ai_p.h:.1f}\n")
                     game.draw(world, fonts)
                     present(screen, world)
                 except Exception:                     # 有 bug 时别让窗口卡死：写日志 + 暂停

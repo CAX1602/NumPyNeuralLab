@@ -55,6 +55,7 @@ LAUNCH_MIN = -0.61
 
 # 观察窗：前 0.15 s，取 4 帧（0 / 0.05 / 0.10 / 0.15 s）× 2 坐标 = 8 输入
 OBS_STEPS = (0, 12, 24, 36)   # DT=1/240 时对应 0/0.05/0.10/0.15 s
+IC_H = 250.0            # 截击高度：与 game.IC_HEIGHT 一致；训练数据的第二预测目标
 
 
 def lever(s):
@@ -84,12 +85,14 @@ def resolve_hit(theta, s, power):
 
 
 def simulate_batch(x0, y0, v0, angle, direction,
-                   drag_k=DRAG_K, dt=DT, max_t=MAX_T):
-    """批量积分一批球，返回 (landing_x, flight_time, obs)。
+                   drag_k=DRAG_K, dt=DT, max_t=MAX_T, with_intercept=False):
+    """批量积分一批球，返回 (landing_x, flight_time, obs)（+ ic_x 如果 with_intercept）。
 
     obs 形状 (n, 4, 2)：前 0.15 s 的 4 帧 (x, y)；球在观察窗内落地时，
     落地后的帧记录为落点静止位置 (landing_x, 0)——球落地就不动了。
     landing_x 为首次 y<=0 的插值落点；未落地为 nan。direction=+1 向 +x 打，-1 向 -x 打。
+    ic_x = 下行穿过截击高度 IC_H=250 时的 x（插值）；整段轨迹没高过 250 的平球
+    取落点（AI 直接按落点站）。AI 的跑位目标是截击点而不是落点。
     """
     x0 = np.asarray(x0, dtype=float)
     y0 = np.asarray(y0, dtype=float)
@@ -106,6 +109,7 @@ def simulate_batch(x0, y0, v0, angle, direction,
     rest = np.zeros_like(pos)           # 落地后的静止位置 (landing_x, 0)
     landing = np.full(n, np.nan)
     ftime = np.full(n, np.nan)
+    ic_x = np.full(n, np.nan)           # 下行穿过 250 的 x（首次）
     obs = np.zeros((n, len(OBS_STEPS), 2))
     obs[:, 0, :] = pos
 
@@ -137,6 +141,19 @@ def simulate_batch(x0, y0, v0, angle, direction,
             active[cross] = False
             landed[cross] = True
 
+        if with_intercept:
+            ic_hit = (np.isnan(ic_x) & (prev[:, 1] > IC_H)
+                      & (pos[:, 1] <= IC_H) & (vel[:, 1] < 0.0))
+            if ic_hit.any():
+                py = prev[ic_hit, 1]
+                frac = (py - IC_H) / (py - pos[ic_hit, 1])
+                ic_x[ic_hit] = (prev[ic_hit, 0]
+                                + frac * (pos[ic_hit, 0] - prev[ic_hit, 0]))
+
+    if with_intercept:
+        # 平球（整段没高过 250）：按落点站
+        ic_x = np.where(np.isnan(ic_x), landing, ic_x)
+        return landing, ftime, obs, ic_x
     return landing, ftime, obs
 
 

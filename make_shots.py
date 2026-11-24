@@ -61,14 +61,15 @@ def main():
     offset = 0
     while kept < N:
         meta = sample_shots(N, SEED + offset)
-        landing, ftime, obs = simulate_batch(
-            meta["x0"], meta["y0"], meta["v0"], meta["angle"], meta["direction"])
+        landing, ftime, obs, ic = simulate_batch(
+            meta["x0"], meta["y0"], meta["v0"], meta["angle"], meta["direction"],
+            with_intercept=True)
         d = meta["direction"]
         cross = np.isfinite(landing) & np.where(
             d > 0, landing > NET_X, landing < NET_X)
         chunks.append({k: v[cross] for k, v in meta.items()} | {
             "landing_x": landing[cross], "flight_time": ftime[cross],
-            "obs": obs[cross]})
+            "ic_x": ic[cross], "obs": obs[cross]})
         kept += int(cross.sum())
         candidates += N
         offset += 1
@@ -79,7 +80,7 @@ def main():
 
     data["obs"] = data["obs"].astype(np.float32)
     for k in ("theta", "s", "power", "direction", "x0", "y0", "v0", "angle",
-              "landing_x", "flight_time"):
+              "landing_x", "flight_time", "ic_x"):
         data[k] = data[k].astype(np.float32)
 
     out = Path(__file__).parent / "shots.npz"
@@ -98,6 +99,8 @@ def main():
     print(f"落点在对方场区内比例 {in_court.mean():.1%}")
     print(f"落点分位数 5/50/95: "
           f"{np.percentile(data['landing_x'], [5, 50, 95]).round(0)}")
+    print(f"截击点分位数 5/50/95: "
+          f"{np.percentile(data['ic_x'], [5, 50, 95]).round(0)}")
     print(f"飞行时间分位数 5/50/95: "
           f"{np.percentile(data['flight_time'], [5, 50, 95]).round(2)} s")
     print(f"飞行时间短于 0.15 s（观察窗需截断）比例 "
