@@ -45,13 +45,23 @@ class TestOracleValue(unittest.TestCase):
         self.assertGreater(long, short)
 
     def test_oracle_marks_infeasible_actions(self):
-        state = np.array([[400.0, 60.0, 0.8, 900.0],     # 低球
+        # 低球取 x0=300：x0=400、离地 60 的挑球到网时低于网顶，撞网判 FAIL
+        state = np.array([[300.0, 60.0, 0.8, 900.0],     # 低球
                           [400.0, 200.0, 0.10, 900.0]])  # 高球但来不及跳
         values = oracle_values(state)
         self.assertEqual(values[0, 1], FAIL)
         self.assertEqual(values[0, 2], FAIL)
         self.assertEqual(values[1, 2], FAIL)
         self.assertGreater(values[0, 0], FAIL)   # 低球挑球是真实仿真分
+
+    def test_oracle_jump_into_net_is_failure(self):
+        # 后场（x0=100）跳杀：接触点 330 px、出球约 −18°，到网时只剩约 100 px 高，
+        # 游戏里会被网挡下；教练必须判 FAIL，而不是按「落点在对方半场」给分
+        values = oracle_values(np.array([[100.0, 200.0, 0.8, 900.0],
+                                         [500.0, 200.0, 0.8, 900.0]]))
+        self.assertEqual(values[0, 2], FAIL)
+        self.assertGreater(values[0, 1], FAIL)      # 同一点打高远照样过网
+        self.assertGreater(values[1, 2], FAIL)      # 前场跳杀不受影响
 
 
 class TestHelpers(unittest.TestCase):
