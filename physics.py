@@ -85,7 +85,8 @@ def resolve_hit(theta, s, power):
 
 
 def simulate_batch(x0, y0, v0, angle, direction,
-                   drag_k=DRAG_K, dt=DT, max_t=MAX_T, with_intercept=False):
+                   drag_k=DRAG_K, dt=DT, max_t=MAX_T, with_intercept=False,
+                   net_h=None):
     """批量积分一批球，返回 (landing_x, flight_time, obs)（+ ic_x 如果 with_intercept）。
 
     obs 形状 (n, 4, 2)：前 0.15 s 的 4 帧 (x, y)；球在观察窗内落地时，
@@ -93,6 +94,9 @@ def simulate_batch(x0, y0, v0, angle, direction,
     landing_x 为首次 y<=0 的插值落点；未落地为 nan。direction=+1 向 +x 打，-1 向 -x 打。
     ic_x = 下行穿过截击高度 IC_H=250 时的 x（插值）；整段轨迹没高过 250 的平球
     取落点（AI 直接按落点站）。AI 的跑位目标是截击点而不是落点。
+    net_h：默认 None 不撞网（与旧行为一致）；给定时（如 NET_HEIGHT），从网下方
+    穿过 x=NET_X 的球按游戏规则被网挡住，landing / flight_time / ic_x 记为 nan，
+    与 game.Ball.step「低于网顶则挡回击球方」一致。
     """
     x0 = np.asarray(x0, dtype=float)
     y0 = np.asarray(y0, dtype=float)
@@ -129,6 +133,14 @@ def simulate_batch(x0, y0, v0, angle, direction,
         vel += acc * dt
         pos += vel * dt
 
+        if net_h is not None:
+            # 从网下穿过网面：被挡住，算作没过网（落点留 nan）
+            blocked = (active & ((prev[:, 0] - NET_X) * (pos[:, 0] - NET_X) < 0)
+                       & (pos[:, 1] < net_h))
+            if blocked.any():
+                active[blocked] = False
+                ic_x[blocked] = np.inf          # 占位，循环后清成 nan
+
         cross = active & (pos[:, 1] <= 0.0) & (vel[:, 1] < 0.0)
         if cross.any():
             py = prev[cross, 1]
@@ -151,8 +163,9 @@ def simulate_batch(x0, y0, v0, angle, direction,
                                 + frac * (pos[ic_hit, 0] - prev[ic_hit, 0]))
 
     if with_intercept:
-        # 平球（整段没高过 250）：按落点站
+        # 平球（整段没高过 250）：按落点站；被网挡住的球落点是 nan，截击点也是 nan
         ic_x = np.where(np.isnan(ic_x), landing, ic_x)
+        ic_x[np.isinf(ic_x)] = np.nan
         return landing, ftime, obs, ic_x
     return landing, ftime, obs
 

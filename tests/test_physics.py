@@ -120,6 +120,23 @@ class TestSimulateBatch(unittest.TestCase):
                                   self.angle, -np.ones(32))
         self.assertTrue(np.allclose(lp + lm, physics.COURT_W, atol=1e-6))
 
+    def test_net_blocks_low_crossing(self):
+        # 同一批球：默认不撞网（旧行为）；给 net_h 后，从网下穿过的球落点 = nan，
+        # 越过网顶的球结果与不撞网时逐位相同
+        x0, y0 = np.array([100.0, 500.0]), np.array([330.0, 330.0])
+        v0, angle = resolve_hit(np.array([0.55, 0.55]), 1.0, 1.0)
+        free, _, _, ic_free = simulate_batch(x0, y0, v0, angle, np.ones(2),
+                                             with_intercept=True)
+        netted, ft, _, ic = simulate_batch(x0, y0, v0, angle, np.ones(2),
+                                           with_intercept=True,
+                                           net_h=physics.NET_HEIGHT)
+        self.assertTrue(np.all(free > NET_X))            # 不撞网时两球都「过网」
+        self.assertTrue(np.isnan(netted[0]))             # 第 0 球过网时高约 100 < 150
+        self.assertTrue(np.isnan(ft[0]))
+        self.assertTrue(np.isnan(ic[0]))
+        self.assertEqual(float(netted[1]), float(free[1]))
+        self.assertEqual(float(ic[1]), float(ic_free[1]))
+
     def test_short_flight_obs_rest_at_landing(self):
         # 快球在 0.15 s 观察窗内落地：落地后的帧必须是落点静止位置，
         # 不能是 (0,0)（否则归一化后变成「球在左上角」的坏输入）

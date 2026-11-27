@@ -10,7 +10,8 @@
 - 被测 AI 在右侧；没有左侧玩家，球由脚本直接发射，R 回击或球落地即下一球。
 - 主实验**关闭末端模拟器精修**（game.AIController.refine=False），
   跑位完全由预测器决定，才能把预测质量差异暴露出来。
-- 主指标：**接球成功率** = R 成功回击数 / 80。附：回球过网率、平均回合时长。
+- 主指标：**接球成功率** = R 成功回击数 / 80。附：回球过网率（过网且落在左半场界内）。
+- 来球只保留会越过网顶的（net_h=NET_HEIGHT），否则被网挡下的球三种 AI 都接不到。
 - 模式：net（双输出网络）/ linear（同特征最小二乘，同一 16000 训练样本）/
   static（站右半场中间 900 不动，只挥拍）。
 """
@@ -26,7 +27,7 @@ import game
 from characters import CHARACTERS
 from landing import flatten_obs, load_dataset
 from landing_baseline import fit as linear_fit, predict as linear_predict
-from physics import COURT_W, NET_X, simulate_batch
+from physics import COURT_W, NET_HEIGHT, NET_X, simulate_batch
 
 N_SHOTS = 80
 SEED = 20261205
@@ -42,8 +43,9 @@ def make_shots(n=N_SHOTS, seed=SEED):
         y0 = rng.uniform(120, 420, m)
         v0 = rng.uniform(1200, 4600, m)
         angle = rng.uniform(-0.55, 0.95, m)
+        # net_h：只要真正越过网顶的来球——被网挡住的球三种 AI 都碰不到，只会压低分母
         landing, _, _, ic = simulate_batch(x0, y0, v0, angle, np.ones(m),
-                                           with_intercept=True)
+                                           with_intercept=True, net_h=NET_HEIGHT)
         ok = np.isfinite(landing) & (landing > NET_X + 20) & (landing < COURT_W - 40)
         for x, y, v, a in zip(x0[ok], y0[ok], v0[ok], angle[ok]):
             shots.append((float(x), float(y), float(v), float(a)))
@@ -102,7 +104,8 @@ def run(mode, shots, refine):
                 break
         if g.hits > 0:
             returned += 1
-            over_net += int(g.ball.last_hitter == "R")
+            # 回球真正过网且落在对方界内（last_hitter 碰到球就是 R，不能当过网判据）
+            over_net += int(not g.ball.live and 0.0 <= g.ball.x < NET_X)
     return returned, over_net
 
 
