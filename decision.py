@@ -11,7 +11,7 @@
     价值 = min(|L − x_h| / T / (2·OPP_SPEED), 1.5) + RECOVER_W · T
 打分——对手（站位 x_h，速度 OPP_SPEED）需要跑多快才够得着，越大越难接；
 飞行时间也给自己回位留时间（高远因此不总是输给跳杀）。
-下网 / 出界 / 不可行动作 = −1。可行规则与游戏一致：
+下网（按游戏规则从网下穿过即被挡）/ 出界 / 不可行动作 = −1。可行规则与游戏一致：
 - 球低于腰部（y0 < 90）：只能挑球；高球：只能高远或跳高远
 - 剩余时间 t_in < 0.30 s：来不及起跳，jump 不可行
 
@@ -25,7 +25,7 @@
 
 import numpy as np
 
-from physics import COURT_W, NET_X, resolve_hit, simulate_batch
+from physics import COURT_W, NET_HEIGHT, NET_X, resolve_hit, simulate_batch
 from landing import forward
 
 ACTIONS = ("lift", "clear", "jump")
@@ -98,7 +98,7 @@ def oracle_values(state, power=1.0):
             x0[idx], y0[idx] + jump_h,
             np.full(int(idx.sum()), float(v0)),
             np.full(int(idx.sum()), float(angle)),
-            np.ones(int(idx.sum())))
+            np.ones(int(idx.sum())), net_h=NET_HEIGHT)   # 撞网 = 落点 nan = FAIL
         values[idx, j] = value_of_outcome(landing, ftime, x_h[idx])
     return values
 
